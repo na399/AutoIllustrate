@@ -66,9 +66,14 @@ installed correctly.
 - **Headless CLI** (`@roberttlange/headless`) — all agent calls go through
   it. It is installed with AutoIllustrate. The default agent is Claude Code,
   so `claude` must also be on `PATH` unless you select a different `--agent`.
-- **`OPENAI_API_KEY`** — required by default: the Phase 3 / Phase 6 vision
+- **`OPENAI_API_KEY`** — used by default: the Phase 3 / Phase 6 vision
   audits use `gpt-6-astra`, and the Phase 5 restyle uses
   `gpt-image-2.5-sunburst` unless a different `--enhance-model` is selected.
+  Not needed with a logged-in Codex CLI: `--agent codex-app-server` runs
+  everything on your ChatGPT subscription (see
+  [Run without API keys](#5-run-without-api-keys-chatgpt-subscription)),
+  and with any agent the vision audits switch to Codex automatically when
+  no key is set.
 - **`GEMINI_API_KEY`** — only if you select a Gemini backend:
   `--enhance-model nanobanana|nanobanana-pro`, or the
   `--audit-vlm gemini-3.1-pro` audit fallback.
@@ -208,6 +213,32 @@ autoillustrate ./sources_bundle/ \
     --prompt "Please make a diagram illustrating the code architecture."
 ```
 
+### 5. Run without API keys (ChatGPT subscription)
+
+With the [Codex CLI](https://developers.openai.com/codex/) installed and
+logged in (`codex login`), `--agent codex-app-server` drives the sub-agents
+through a local `codex app-server`. It also defaults the vision audits, the
+unit tests and the restyle to `codex-app-server`, so no `OPENAI_API_KEY` is
+needed:
+
+```bash
+autoillustrate doctor --agent codex-app-server
+autoillustrate examples/ai_scientist_method.tex \
+    --prompt "Please make a diagram illustrating the method of our scientific research paper in a single panel." \
+    --agent codex-app-server --mode full
+```
+
+The audit scripts also work this way when run by hand, outside a pipeline run:
+
+```bash
+python scripts/inspect_panel.py --workdir runs/<run> --panel-id <panel> \
+    --audit-vlm codex-app-server
+```
+
+Usage is billed to your ChatGPT plan's Codex limits. See
+[docs/codex-app-server.md](docs/codex-app-server.md) for how this works and
+its security boundaries.
+
 ## How it works
 
 <p align="center">
@@ -235,6 +266,9 @@ See [docs/pipeline.md](docs/pipeline.md) for the details.
   like, exit codes, interactive editing, resuming runs.
 - [How it works](docs/pipeline.md) — the six phases, the `--mode` presets,
   what is editable, and the run directory layout.
+- [Codex app-server](docs/codex-app-server.md) — running on a ChatGPT
+  subscription without API keys: the `codex-app-server` agent, the keyless
+  audit/restyle backends and the Codex broker.
 
 ## Citation
 

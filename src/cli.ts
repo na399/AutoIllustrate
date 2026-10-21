@@ -17,7 +17,7 @@ import {
 import { DEFAULT_MODE, MODE_PRESETS, type Mode, resolveMode } from "./modes.js";
 import { runCredentials, runDoctor } from "./doctor.js";
 import { TeeLog } from "./exec.js";
-import { requestBrokerExport } from "./codex-broker.js";
+import { requestBrokerExport, startCodexBroker } from "./codex-broker.js";
 import { exportDrawioPngRobust } from "./export-png.js";
 import { configureLogging, type LogFormat } from "./log.js";
 import { toolkitDir } from "./paths.js";
@@ -193,6 +193,10 @@ Other:
       export                Hardened drawio→PNG export: fast-fail direct
                             attempt, then SVG + headless-Chrome fallback.
                             Used by sub-agents instead of raw drawio -x.
+      broker --workdir <d>  Serve the codex-app-server audit/image backends
+                            until stdin closes (started automatically by
+                            standalone inspect_panel.py / verify.py /
+                            enhance.py runs; pipeline runs start their own).
       --export-width <px>   Output pixel width for export (default: scale).
       --export-scale <f>    Scale factor for export (default: 2).
   -h, --help                Show this help.
@@ -202,7 +206,9 @@ Environment:
   OPENAI_API_KEY            Required for Phases 3/6, and 5 unless a
                             nanobanana, codex or codex-app-server
                             --enhance-model is selected (env or ./.env).
-                            Not needed by --agent codex-app-server's defaults.
+                            Not needed by --agent codex-app-server's defaults;
+                            without it, other agents' vision audits use
+                            codex-app-server when Codex is available.
   GEMINI_API_KEY            Required for Phase 5 with --enhance-model
                             nanobanana | nanobanana-pro (env or ./.env).
   AUDIT_VLM                 Vision model for the content audits — Phase 3
@@ -287,11 +293,12 @@ export interface LoggingOptions {
 }
 
 export interface ParsedCli {
-  command: "run" | "doctor" | "credentials" | "help" | "version" | "export";
+  command: "run" | "doctor" | "credentials" | "help" | "version" | "export" | "broker";
   pipeline?: PipelineOptions;
   agent: string;
   logging: LoggingOptions;
   export?: { drawioPath: string; pngOut: string; widthPx?: number; scale?: number };
+  broker?: { workdir: string; descriptorPath?: string };
 }
 
 const LOG_FORMATS: LogFormat[] = ["human", "json"];
@@ -343,6 +350,7 @@ export function parseCli(argv: string[]): ParsedCli {
       debug: { type: "boolean" },
       verbose: { type: "boolean" },
       "log-format": { type: "string" },
+      "broker-descriptor": { type: "string" },
       "heartbeat-seconds": { type: "string" },
       tmux: { type: "boolean" },
       "export-width": { type: "string" },
@@ -360,6 +368,10 @@ export function parseCli(argv: string[]): ParsedCli {
     throw new UsageError(`--agent must be one of ${KNOWN_AGENTS.join(", ")}`);
   }
   if (positionals[0] === "doctor") return { command: "doctor", agent, logging };
+  if (positionals[0] === "broker") {
+    if (!values.workdir || positionals.length > 1) throw new UsageError("broker needs exactly: autoillustrate broker --workdir <dir> [--broker-descriptor <path>]");
+    return { command: "broker", agent, logging, broker: { workdir: values.workdir, descriptorPath: values["broker-descriptor"] } };
+  }
   if (positionals[0] === "credentials") return { command: "credentials", agent, logging };
   if (positionals[0] === "export") {
     const [, drawioPath, pngOut] = positionals;
@@ -540,6 +552,8 @@ export async function main(argv: string[]): Promise<number> {
       return runCredentials();
     case "export":
       return runExport(parsed.export!);
+    case "broker":
+      return runBroker(parsed.broker!);
     case "run":
       return runPipeline(parsed.pipeline!);
     default: {
@@ -585,6 +599,20 @@ async function runExport(opts: NonNullable<ParsedCli["export"]>): Promise<number
   } finally {
     await tee.close();
   }
+}
+
+// A private Codex broker for a standalone script (scripts/_codex_broker.py
+// starts it). Prints "ready <descriptor>" once serving, then runs until its
+// parent closes stdin (or dies) or a signal arrives.
+async function runBroker(opts: NonNullable<ParsedCli["broker"]>): Promise<number> {
+  const broker = await startCodexBroker({ workdir: path.resolve(opts.workdir), descriptorPath: opts.descriptorPath && path.resolve(opts.descriptorPath) });
+  process.stdout.write(`ready ${broker.descriptorPath}\n`);
+  await new Promise<void>((resolve) => {
+    process.stdin.on("end", resolve).on("close", resolve).on("error", resolve).resume();
+    process.once("SIGTERM", resolve).once("SIGINT", resolve);
+  });
+  await broker.close();
+  return 0;
 }
 
 function isDirectRun(): boolean {

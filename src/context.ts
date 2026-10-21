@@ -152,3 +152,17 @@ export interface RunContext {
   python: string; // venv interpreter, absolute
   env: NodeJS.ProcessEnv;
 }
+
+// Without OPENAI_API_KEY the API-backed audit default cannot run. When the
+// user made no audit choice and a Codex app-server is available, run the
+// vision audits (Phase 3 inspect, Phase 6 verify + unit tests) on the ChatGPT
+// subscription through the Codex broker instead of failing preflight. The
+// enhance model is left alone: it is an explicit image-quality choice.
+export function keylessAuditFallback(
+  b: ModelBackends,
+  ctx: { explicitChoice: boolean; hasOpenaiKey: boolean; codexAppServerAvailable: () => boolean },
+): ModelBackends {
+  if (ctx.explicitChoice || ctx.hasOpenaiKey || b.auditBackend !== "openai") return b;
+  if (!ctx.codexAppServerAvailable()) return b;
+  return { ...b, auditVlm: CODEX_APP_SERVER_BACKEND, unitTestVlm: "auto", auditBackend: "codex-app-server", unitTestBackend: "codex-app-server" };
+}

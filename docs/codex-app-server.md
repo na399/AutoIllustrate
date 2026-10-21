@@ -26,7 +26,9 @@ or turn a ChatGPT session into an API key.
 
 A complete run needs no `OPENAI_API_KEY`: with this agent, the image restyle,
 the vision audits and the unit tests also default to the ChatGPT subscription
-through the run's [Codex broker](#codex-broker-audits-unit-tests-and-enhance):
+through the run's [Codex broker](#codex-broker-audits-unit-tests-and-enhance).
+The audits can also run keyless by hand or under other agents; see
+[Without a pipeline run, and with other agents](#without-a-pipeline-run-and-with-other-agents).
 
 ```sh
 node dist/cli.js /path/to/paper.tex \
@@ -142,10 +144,32 @@ output schemas matching their validators and record usage to
 dollar cost). The broker is unrelated to any app-server you may already run
 (for example `codex app-server --listen ws://…`); it never connects to one.
 
+### Without a pipeline run, and with other agents
+
+Run by hand, the scripts find no run broker (neither
+`<workdir>/.codex-broker.json` nor `$AUTOILLUSTRATE_CODEX_BROKER`), so
+`scripts/_codex_broker.py` starts a private one: `node dist/cli.js broker
+--workdir <dir> --broker-descriptor <private temp file>`. It serves the
+vision/image routes (no export) until the script exits, which closes its
+stdin. Its descriptor stays outside the workdir, so concurrent scripts never
+share one:
+
+```sh
+python scripts/inspect_panel.py --workdir runs/<run> --panel-id <panel> --audit-vlm codex-app-server
+python scripts/verify.py --workdir runs/<run> --audit-vlm codex-app-server --unit-test-vlm auto \
+    --reference runs/<run>/figures/full_figure.png --candidate runs/<run>/figures/full_figure_enhanced.png
+```
+
+With another agent (for example the default `claude`), a run that makes no
+audit choice and finds no `OPENAI_API_KEY` uses `codex-app-server` for the
+vision audits when the app-server executable is available, and says so in the
+log. An explicit `--audit-vlm`, `--unit-test-vlm`, `AUDIT_VLM` or
+`UNIT_TEST_VLM` always wins, and the restyle model is never switched.
+
 Resume uses existing pipeline artifacts and a fresh Codex thread, not a resumed
 Codex conversation. The agent transport has no connection pool, shared desktop
 session or WebSocket transport; the only listener is the loopback broker above,
-started only for broker backends. `--tmux` is rejected for this
+started for broker backends and for every `codex-app-server` agent run. `--tmux` is rejected for this
 provider. POSIX process groups are required; native Windows is rejected with a
 WSL recommendation.
 

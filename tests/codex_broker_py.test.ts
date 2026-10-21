@@ -62,7 +62,7 @@ print(text)
   assert.equal(record.output_tokens, 7);
 });
 
-test("generate_image returns PNG bytes; broker failures and a missing descriptor raise CodexBrokerError", async (t) => {
+test("generate_image returns PNG bytes; broker failures and a corrupt descriptor raise CodexBrokerError", async (t) => {
   const f = await startFakeBroker(t);
   const r = await python(["-c", snippet(`
 import _codex_broker as cb
@@ -73,11 +73,12 @@ try:
     raise SystemExit("expected failure")
 except cb.CodexBrokerError as exc:
     assert "no image" in str(exc), exc
+open(${JSON.stringify(path.join(f.dir, CODEX_BROKER_FILE))}, "w").write("{corrupt")
 try:
     cb.ask_vision(${JSON.stringify(f.dir)}, parts=["x"], phase=3)
     raise SystemExit("expected failure")
 except cb.CodexBrokerError as exc:
-    assert "${CODEX_BROKER_FILE}" in str(exc) and "codex-app-server" in str(exc), exc
+    assert "${CODEX_BROKER_FILE}" in str(exc), exc
 print("ok")
 `)], f.env);
   assert.equal(r.code, 0, r.stderr + r.stdout);
@@ -178,4 +179,41 @@ print("ok")
 `)], process.env);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   assert.equal(r.stdout.trim().split("\n").at(-1), "ok");
+});
+
+test("standalone: without a run's broker the client starts a private one for the script's lifetime", async (t) => {
+  // dist/cli.js is the built artifact `npm run check` produces (see smoke.test.ts).
+  assert.ok(fs.existsSync("dist/cli.js"), "dist/cli.js missing — run npm run build first");
+  const f = await startFakeBroker(t); // only for its fake codex + record file
+  await f.broker.close(); // no pipeline broker: the descriptor is gone
+  const workdir = fs.mkdtempSync(path.join(f.dir, "standalone-"));
+  const env = { ...f.env, OPENAI_API_KEY: "", AUTOILLUSTRATE_CODEX_BROKER: "" };
+  const r = await python(["-c", snippet(`
+import json, _codex_broker as cb
+print(cb.ask_vision(${JSON.stringify(workdir)}, parts=["standalone?"], phase=3))
+`)], env);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split("\n").at(-1)!).texts, ["standalone?"]);
+  assert.ok(!fs.existsSync(path.join(workdir, CODEX_BROKER_FILE)), "standalone mode must not publish into the workdir");
+  // The private broker (and its app-server child) end with the script.
+  const pid = f.records().find((m) => m.argv)!.pid as number;
+  for (const until = Date.now() + 5000; ; ) {
+    try { process.kill(pid, 0); } catch { break; }
+    assert.ok(Date.now() < until, "app-server child outlived the script");
+    await new Promise((res) => setTimeout(res, 100));
+  }
+});
+
+test("standalone inspect_panel.py --audit-vlm codex-app-server needs no key and no pipeline", async (t) => {
+  assert.ok(fs.existsSync("dist/cli.js"), "dist/cli.js missing — run npm run build first");
+  const verdict = JSON.stringify({ has_defects: false, issues: [], summary: "fine" });
+  const f = await startFakeBroker(t, "ok", { CODEX_TEST_REPLIES: JSON.stringify({ has_defects: verdict }) });
+  await f.broker.close();
+  await writePng(path.join(f.workdir, "panels", "p1.png"), f.env);
+  fs.writeFileSync(path.join(f.workdir, "p1.plan.md"), "# plan");
+  fs.writeFileSync(path.join(f.workdir, "methods.md"), "# methods");
+  const r = await python(["scripts/inspect_panel.py", "--workdir", f.workdir, "--panel-id", "p1", "--audit-vlm", "codex-app-server"],
+    { ...f.env, OPENAI_API_KEY: "", GEMINI_API_KEY: "", AUTOILLUSTRATE_CODEX_BROKER: "" });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.workdir, "panels", "p1.inspect.json"), "utf8")).has_defects, false);
 });

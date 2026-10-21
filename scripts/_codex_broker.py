@@ -4,14 +4,21 @@ The `codex-app-server` backends of inspect_panel.py, verify.py and enhance.py
 call this instead of an API SDK. The orchestrator runs ChatGPT-authenticated
 `codex app-server` children outside the coding agent's sandbox and publishes a
 loopback endpoint plus a capability token in ``<workdir>/.codex-broker.json``;
-no API key or OAuth credential ever reaches these scripts. Standard library
+no API key or OAuth credential ever reaches these scripts. Run by hand, with
+no pipeline broker around, a script starts a private broker
+(``node dist/cli.js broker``) for its own lifetime instead. Standard library
 only, so it works in every interpreter the pipeline may use.
 """
 from __future__ import annotations
 
+import atexit
 import base64
 import http.client
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -27,6 +34,10 @@ IMAGE_SOURCE = "codex-app-server-image"
 # turn slot; this socket bound also covers time queued behind other turns.
 DEFAULT_TIMEOUT_SECS = 60 * 60
 
+STANDALONE_START_SECS = 30
+_TOOLKIT_CLI = Path(__file__).resolve().parent.parent / "dist" / "cli.js"
+_standalone: Optional[tuple[subprocess.Popen, Path]] = None
+
 # Loopback only: never route broker traffic (or its token) through a proxy.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -37,18 +48,72 @@ class CodexBrokerError(RuntimeError):
     """The broker is unavailable or the Codex turn failed."""
 
 
-def _endpoint(workdir: Union[str, Path]) -> tuple[str, str]:
-    path = Path(workdir) / BROKER_FILE
+def _read_descriptor(path: Path) -> tuple[str, str]:
+    descriptor = json.loads(path.read_text())
+    return str(descriptor["url"]), str(descriptor["token"])
+
+
+def _stop_standalone() -> None:
+    global _standalone
+    if _standalone is None:
+        return
+    proc, private_dir = _standalone
+    _standalone = None
     try:
-        descriptor = json.loads(path.read_text())
-        return str(descriptor["url"]), str(descriptor["token"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if proc.stdin:
+            proc.stdin.close()  # EOF tells the broker to shut down cleanly
+        proc.wait(timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        proc.kill()
+    shutil.rmtree(private_dir, ignore_errors=True)
+
+
+def _start_standalone(workdir: Union[str, Path]) -> Path:
+    """Start a private broker for this process; return its descriptor path."""
+    global _standalone
+    node = shutil.which("node")
+    if node is None or not _TOOLKIT_CLI.exists():
         raise CodexBrokerError(
-            f"no usable Codex broker descriptor at {path} ({exc}). The "
-            "codex-app-server backends only work inside an autoillustrate run, "
-            "which starts the broker; run the pipeline with --agent "
-            "codex-app-server (or --audit-vlm/--enhance-model codex-app-server)."
-        ) from exc
+            f"no Codex broker is running and a private one cannot start "
+            f"(need `node` on PATH and the built {_TOOLKIT_CLI}; run "
+            "`npm run build`). Inside a pipeline run, use --agent "
+            "codex-app-server or a codex-app-server --audit-vlm/--enhance-model.")
+    # Outside the workdir, so concurrent scripts there never share or clobber it.
+    private_dir = Path(tempfile.mkdtemp(prefix="autoillustrate-broker-"))
+    descriptor = private_dir / "broker.json"
+    proc = subprocess.Popen(
+        [node, str(_TOOLKIT_CLI), "broker", "--workdir", str(Path(workdir).resolve()),
+         "--broker-descriptor", str(descriptor)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _standalone = (proc, private_dir)
+    atexit.register(_stop_standalone)
+    deadline = time.monotonic() + STANDALONE_START_SECS
+    # The broker prints "ready <descriptor>" once it is serving.
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline() if proc.stdout else ""
+        if line.startswith("ready "):
+            return descriptor
+        if not line and proc.poll() is not None:
+            break
+    err = (proc.stderr.read() if proc.stderr and proc.poll() is not None else "")[-800:]
+    _stop_standalone()
+    raise CodexBrokerError(f"private Codex broker did not start: {err.strip() or 'timed out'}")
+
+
+def _endpoint(workdir: Union[str, Path]) -> tuple[str, str]:
+    """The run's broker (<workdir>/.codex-broker.json, or the descriptor the
+    pipeline names in $AUTOILLUSTRATE_CODEX_BROKER), else a private one."""
+    candidates = [Path(workdir) / BROKER_FILE]
+    if os.environ.get("AUTOILLUSTRATE_CODEX_BROKER"):
+        candidates.append(Path(os.environ["AUTOILLUSTRATE_CODEX_BROKER"]))
+    for path in candidates:
+        if path.exists():
+            try:
+                return _read_descriptor(path)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise CodexBrokerError(f"unusable Codex broker descriptor at {path} ({exc})") from exc
+    descriptor = _standalone[1] / "broker.json" if _standalone else _start_standalone(workdir)
+    return _read_descriptor(descriptor)
 
 
 def _post(workdir: Union[str, Path], route: str, payload: dict, timeout: float) -> dict:

@@ -83,6 +83,9 @@ export interface CodexBrokerOptions {
   maxConcurrency?: number;
   // Serves /v1/export when set; the pipeline passes the hardened exporter.
   exportDrawio?: (req: BrokerExportRequest) => Promise<void>;
+  // Where to publish url+token (default <workdir>/.codex-broker.json). A
+  // standalone script's private broker publishes outside the workdir.
+  descriptorPath?: string;
 }
 export interface CodexBroker {
   url: string;
@@ -452,7 +455,7 @@ export async function startCodexBroker(options: CodexBrokerOptions): Promise<Cod
   });
   const port = (server.address() as { port: number }).port;
   const url = `http://127.0.0.1:${port}`;
-  const descriptorPath = path.join(options.workdir, CODEX_BROKER_FILE);
+  const descriptorPath = options.descriptorPath ?? path.join(options.workdir, CODEX_BROKER_FILE);
   // The workdir is agent-writable: create the temp file exclusively (never
   // through a planted symlink); rename replaces, not follows, a link.
   const temp = `${descriptorPath}.${crypto.randomBytes(8).toString("hex")}.tmp`;

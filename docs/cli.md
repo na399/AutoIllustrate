@@ -68,7 +68,8 @@ autoillustrate export <in.drawio> <out.png> [--export-width <px> | --export-scal
     --audit-vlm <m>       gpt-6-astra | gpt-5.5 | gemini-3.1-pro | codex-app-server
                           (default: gpt-6-astra, at high reasoning effort;
                           codex-app-server — Codex's model via the run's broker,
-                          no API key — with --agent codex-app-server). Vision
+                          no API key — with --agent codex-app-server, or when
+                          OPENAI_API_KEY is unset and Codex is available). Vision
                           model for the content audits — Phase 3 panel inspect
                           and Phase 6 verify Stage A (one shared knob). Sets
                           $AUDIT_VLM for the sub-agents.
@@ -162,8 +163,32 @@ credentials               Report every credential the pipeline can use:
                           ./.env), plus codex and Claude Code login state.
                           Always exits 0.
 export                    Hardened drawio → PNG export; see "Export
-                          reliability" below.
+                          reliability" below. Inside a codex-app-server agent
+                          it delegates to the run's Codex broker.
+broker --workdir <dir>    Serve the codex-app-server audit/image backends until
+                          stdin closes. Standalone inspect_panel.py / verify.py /
+                          enhance.py runs start it automatically; pipeline runs
+                          start their own. [--broker-descriptor <path>] sets
+                          where the URL + token are written.
 ```
+
+### Vision audits without an API key
+
+The audits need no `OPENAI_API_KEY` when they run on `codex-app-server`
+(your ChatGPT subscription, through a local Codex app-server):
+
+- `--agent codex-app-server` selects it by default.
+- With any other agent, if you pass no `--audit-vlm` / `--unit-test-vlm`
+  (and export no `AUDIT_VLM` / `UNIT_TEST_VLM`), no `OPENAI_API_KEY` is
+  found, and `codex app-server` is available, the run logs a notice and
+  uses it for the audits. The restyle is not switched: keep a key, or pass
+  `--enhance-model codex-app-server` (or `--skip-enhance`).
+- Run by hand, `inspect_panel.py` / `verify.py --audit-vlm codex-app-server`
+  start a private broker for the script's lifetime; this needs `node` and
+  the built `dist/cli.js`.
+
+A run's preflight checks `codex login status` whenever a `codex-app-server`
+backend is selected. See [Codex app-server](codex-app-server.md).
 
 Headless and `OPENAI_API_KEY` are not checked for `doctor --agent codex-app-server`,
 whose default image/audit backends run through the Codex broker without an API key.

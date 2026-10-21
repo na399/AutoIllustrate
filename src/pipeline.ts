@@ -11,6 +11,7 @@ import {
   DEFAULT_ENHANCE_QUALITY,
   DEFAULT_ENHANCEMENT_ATTEMPTS,
   DEFAULT_PANEL_INSPECTS,
+  keylessAuditFallback,
   modelNeeds,
   resolveModelBackends,
   type PhaseResult,
@@ -49,7 +50,7 @@ import { runPhase4 } from "./phase-compose.js";
 import { runPhase5 } from "./phase-enhance.js";
 import { runPhase6 } from "./phase-verify.js";
 import { runInteractiveEdit, type EditDecision, type InteractiveHooks } from "./interactive.js";
-import { preflight, withDotenvCredentials } from "./doctor.js";
+import { checkCodexAppServerCli, checkOpenaiKey, preflight, withDotenvCredentials } from "./doctor.js";
 import { panelIds, readJsonString } from "./reports.js";
 import { installInterruptHandler, isTearingDown } from "./registry.js";
 import { getVenvPython, withVenvOnPath } from "./venv.js";
@@ -215,7 +216,15 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
   // OPENAI_API_KEY (and a Gemini audit can't start without GEMINI_API_KEY).
   // --panel-inspects 0 drops the Phase 3 consumer, so a 0-inspect, 0-verify
   // run needs no audit backend at all.
-  const backends = resolveModelBackends(opts.agent, baseEnv, opts.enhanceModel);
+  const resolved = resolveModelBackends(opts.agent, baseEnv, opts.enhanceModel);
+  const backends = keylessAuditFallback(resolved, {
+    explicitChoice: baseEnv.AUDIT_VLM !== undefined || baseEnv.UNIT_TEST_VLM !== undefined,
+    hasOpenaiKey: checkOpenaiKey(baseEnv, opts.cwd).ok,
+    codexAppServerAvailable: () => checkCodexAppServerCli(baseEnv).ok,
+  });
+  if (backends !== resolved) {
+    logInfo("run", "OPENAI_API_KEY not set: vision audits use codex-app-server (ChatGPT subscription via the Codex broker); pass --audit-vlm to choose another backend");
+  }
   const { enhanceModel, auditVlm, unitTestVlm } = backends;
   const auditRuns = runsInspect || runsVerify;
   const { needsOpenai, needsGemini, needsCodexCli, needsCodexBroker, codexBrokerFromAgents } = modelNeeds(backends, { runsInspect, runsVerify, runsEnhance });

@@ -25,9 +25,14 @@ autoillustrate doctor            # checks every prerequisite and prints fix-it h
 - **Headless CLI** (`@roberttlange/headless`) — all agent calls go through
   it. It is installed with AutoIllustrate. The default agent is Claude Code,
   so `claude` must also be on `PATH` unless you select a different `--agent`.
-- **`OPENAI_API_KEY`** — required by default. Phase 3 and Phase 6 vision
+- **`OPENAI_API_KEY`** — used by default. Phase 3 and Phase 6 vision
   audits use `gpt-6-astra`, and the Phase 5 restyle uses
   `gpt-image-2.5-sunburst` unless a different `--enhance-model` is selected.
+  A logged-in Codex CLI can replace it: `--agent codex-app-server` needs no
+  key at all, and with other agents the vision audits fall back to
+  `codex-app-server` when no key is set (the restyle still needs a key or
+  `--enhance-model codex-app-server`). See
+  [Codex app-server](codex-app-server.md).
 - **`GEMINI_API_KEY`** — required only for a Gemini backend:
   `--enhance-model nanobanana|nanobanana-pro|gemini-*` or
   `--audit-vlm gemini-3.1-pro`.
@@ -54,7 +59,9 @@ with it. Without Chrome the fallback is unavailable; see
 ## Other agents
 
 The `--agent` flag switches the coding agent that runs the LM sub-agents:
-`claude` (default), `codex`, `cursor`, `gemini`, `opencode`, or `pi`. The
-chosen agent's CLI must be on `PATH` and logged in; `autoillustrate doctor
---agent <name>` checks it. See the [CLI reference](cli.md#models-and-backends)
+`claude` (default), `codex`, `codex-app-server`, `cursor`, `gemini`,
+`opencode`, or `pi`. The chosen agent's CLI must be on `PATH` and logged in;
+`autoillustrate doctor --agent <name>` checks it. `codex-app-server` talks to
+a local `codex app-server` instead of going through Headless and keeps the
+whole run on the ChatGPT subscription ([details](codex-app-server.md)). See the [CLI reference](cli.md#models-and-backends)
 for per-agent model and effort defaults.

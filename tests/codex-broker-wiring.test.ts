@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseCli } from "../src/cli.js";
-import { agentBackendDefaults, modelNeeds, resolveModelBackends } from "../src/context.js";
+import { agentBackendDefaults, keylessAuditFallback, modelNeeds, resolveModelBackends } from "../src/context.js";
 import { allChecks, preflight } from "../src/doctor.js";
 import { runPipeline, type PipelineOptions } from "../src/pipeline.js";
 
@@ -168,4 +168,29 @@ exit 0
   assert.ok(lines.some((l) => l === "enhance model=codex-app-server broker=yes"));
   const runDir = path.join(opts.outDir, fs.readdirSync(opts.outDir)[0]);
   assert.ok(!fs.existsSync(path.join(runDir, ".codex-broker.json")), "broker descriptor must be removed when the run ends");
+});
+
+test("keyless fallback: no OPENAI_API_KEY + no explicit audit choice + app-server available → codex-app-server audits", () => {
+  const base = resolveModelBackends("claude", {});
+  const fallback = keylessAuditFallback(base, { explicitChoice: false, hasOpenaiKey: false, codexAppServerAvailable: () => true });
+  assert.equal(fallback.auditVlm, "codex-app-server");
+  assert.equal(fallback.unitTestVlm, "auto");
+  assert.equal(fallback.auditBackend, "codex-app-server");
+  assert.equal(fallback.unitTestBackend, "codex-app-server");
+  assert.equal(fallback.enhanceModel, base.enhanceModel, "only the vision audits fall back");
+  let probed = false;
+  const probe = () => { probed = true; return true; };
+  assert.equal(keylessAuditFallback(base, { explicitChoice: false, hasOpenaiKey: true, codexAppServerAvailable: probe }), base);
+  assert.equal(keylessAuditFallback(base, { explicitChoice: true, hasOpenaiKey: false, codexAppServerAvailable: probe }), base);
+  assert.equal(probed, false, "the executable probe runs only when a fallback is possible");
+  assert.equal(keylessAuditFallback(base, { explicitChoice: false, hasOpenaiKey: false, codexAppServerAvailable: () => false }), base);
+  const gemini = resolveModelBackends("claude", { AUDIT_VLM: "gemini-3.1-pro" });
+  assert.equal(keylessAuditFallback(gemini, { explicitChoice: false, hasOpenaiKey: false, codexAppServerAvailable: () => true }), gemini);
+});
+
+test("CLI: `broker` requires --workdir and accepts --broker-descriptor", () => {
+  assert.throws(() => parseCli(["broker"]), /--workdir/);
+  const parsed = parseCli(["broker", "--workdir", "/tmp/w", "--broker-descriptor", "/tmp/d.json"]);
+  assert.equal(parsed.command, "broker");
+  assert.deepEqual(parsed.command === "broker" ? parsed.broker : undefined, { workdir: "/tmp/w", descriptorPath: "/tmp/d.json" });
 });
