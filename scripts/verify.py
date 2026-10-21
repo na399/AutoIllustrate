@@ -53,6 +53,9 @@ and merges them into a single verdict at `figures/verify.json`:
       - `codex` — one `codex exec` probe per question, billed to a
         ChatGPT subscription. (Currently unreliable; kept for fallback,
         falls back to `openai-single` if `codex` is not installed.)
+      - `codex-app-server` — the analog of `openai-single` (ONE call, image
+        sent once) served by the pipeline run's Codex broker: ChatGPT
+        subscription, no API key, and it works inside a sandboxed agent.
       - `auto` — follow Stage A's `--audit-vlm` backend.
 
     Each failing unit test is promoted into the verdict's `issues`
@@ -117,6 +120,10 @@ VLM_REGISTRY: dict[str, dict[str, str]] = {
                        "reasoning_effort": "high"},
     "gpt-5.5":        {"backend": "openai", "model": "gpt-5.5"},
     "gemini-3.1-pro": {"backend": "gemini", "model": "gemini-3.1-pro-preview"},
+    # ChatGPT subscription via the orchestrator's Codex broker (no API key);
+    # the model is Codex's configured default ($AUTOILLUSTRATE_CODEX_VISION_MODEL).
+    "codex-app-server": {"backend": "codex-app-server", "model": "codex-app-server",
+                         "reasoning_effort": "high"},
 }
 VLM_CHOICES = list(VLM_REGISTRY)
 # OpenAI VLM the `openai*` Stage B modes fall back to when Stage A runs on
@@ -141,10 +148,48 @@ DEFAULT_UT_BACKEND = os.environ.get("UNIT_TEST_VLM", "openai-single")
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_MODEL") or None
 DEFAULT_CODEX_CONCURRENCY = 4
 UT_BACKEND_CHOICES = ("auto", "openai", "openai-single", "gemini",
-                      "gemini-single", "codex")
+                      "gemini-single", "codex", "codex-app-server")
 
 VALID_SEVERITIES = {"critical", "minor"}
 VALID_YES_NO = {"yes", "no"}
+
+# Structured-output schemas for the codex-app-server backend: exactly the
+# shapes SYSTEM_PROMPT / UNIT_TEST_BATCH_SYSTEM_PROMPT request.
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "has_wrong_content": {"type": "boolean"},
+        "issues": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"},
+                "expected": {"type": "string"},
+                "actual": {"type": "string"},
+                "severity": {"type": "string", "enum": sorted(VALID_SEVERITIES)},
+            },
+            "required": ["location", "expected", "actual", "severity"],
+            "additionalProperties": False,
+        }},
+        "summary": {"type": "string"},
+    },
+    "required": ["has_wrong_content", "issues", "summary"],
+    "additionalProperties": False,
+}
+BATCH_ANSWERS_SCHEMA = {
+    "type": "object",
+    "properties": {"answers": {"type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "answer": {"type": "string", "enum": sorted(VALID_YES_NO)},
+            "rationale": {"type": "string"},
+        },
+        "required": ["id", "answer", "rationale"],
+        "additionalProperties": False,
+    }}},
+    "required": ["answers"],
+    "additionalProperties": False,
+}
 
 
 SYSTEM_PROMPT = """\
@@ -728,7 +773,10 @@ def _cli() -> int:
                         "in ONE Gemini call, image inline once, no cache "
                         "round-trip); 'codex' routes "
                         "each probe through `codex exec` (ChatGPT "
-                        "subscription); 'auto' follows --audit-vlm. Default from "
+                        "subscription); 'codex-app-server' answers ALL "
+                        "questions in ONE turn through the run's Codex broker "
+                        "(ChatGPT subscription, no API key); 'auto' follows "
+                        "--audit-vlm. Default from "
                         f"$UNIT_TEST_VLM or '{DEFAULT_UT_BACKEND}'. 'codex' "
                         "falls back to 'openai-single' (with a warning) if "
                         "`codex` is not installed.")
@@ -1107,24 +1155,14 @@ raw LaTeX visible?") and you do not see the defect, answer "no".
 """
 
 
-def _run_unit_tests_openai_single(
-    *, model: str, candidate_bytes: bytes, questions: list[dict],
-    workdir: Path, max_retries: int = 1,
-    reasoning_effort: str | None = None,
+def _run_unit_tests_single(
+    *, label: str, questions: list[dict], call, max_retries: int = 1,
 ) -> tuple[list[dict], bool]:
-    """Answer ALL unit-test questions in ONE OpenAI call. The candidate image
-    is sent exactly once and every question is enumerated 0..N-1; the model
-    returns a JSON array of answers keyed by id. Trades per-question isolation
-    for ~1/N the image cost. used_cache is always False (single call)."""
-    err = _ensure_openai_key()
-    if err is not None:
-        raise RuntimeError("OPENAI_API_KEY missing")
-    imp = _import_openai()
-    if imp is None:
-        raise RuntimeError("openai package missing")
-    OpenAI, _ = imp
-
-    client = OpenAI()
+    """Shared driver for the single-call Stage B modes: enumerate every
+    question 0..N-1, ask once via ``call(user_text) -> raw JSON text`` (which
+    records its own usage), retry on an exception or an unusable reply, and map
+    the {"answers": [{id, answer, rationale}]} reply back onto the questions.
+    used_cache is always False (single call)."""
     numbered = "\n".join(f"{i}. {q['question']}" for i, q in enumerate(questions))
     user_text = (
         "Answer every question below about the CANDIDATE image. Return one "
@@ -1134,34 +1172,12 @@ def _run_unit_tests_openai_single(
 
     answers_by_id: dict[int, dict] = {}
     last_error: str | None = None
-    print(f"unit-tests: single {model} call for {len(questions)} question(s) "
+    print(f"unit-tests: single {label} call for {len(questions)} question(s) "
           f"(image sent once) ...")
     for _ in range(max_retries + 1):
         try:
-            started = time.perf_counter()
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system",
-                     "content": UNIT_TEST_BATCH_SYSTEM_PROMPT},
-                    {"role": "user", "content": [
-                        {"type": "image_url",
-                         "image_url": {"url": _b64_data_url(candidate_bytes)}},
-                        {"type": "text", "text": user_text},
-                    ]},
-                ],
-                response_format={"type": "json_object"},
-                **_reasoning_kwargs(reasoning_effort),
-            )
-            usage = getattr(response, "usage", None)
-            record_usage(workdir, phase=6, source="openai-vision", model=model,
-                         duration_secs=time.perf_counter() - started,
-                         basis="tokens",
-                         input_tokens=getattr(usage, "prompt_tokens", None),
-                         output_tokens=getattr(usage, "completion_tokens", None))
-            raw = (response.choices[0].message.content or "").strip()
-            obj = json.loads(raw)
-            arr = obj.get("answers")
+            obj = json.loads((call(user_text) or "").strip())
+            arr = obj.get("answers") if isinstance(obj, dict) else None
             if isinstance(arr, list):
                 for entry in arr:
                     if not isinstance(entry, dict):
@@ -1210,6 +1226,53 @@ def _run_unit_tests_openai_single(
             "line": q["line"],
         })
     return results, False
+
+
+def _run_unit_tests_openai_single(
+    *, model: str, candidate_bytes: bytes, questions: list[dict],
+    workdir: Path, max_retries: int = 1,
+    reasoning_effort: str | None = None,
+) -> tuple[list[dict], bool]:
+    """Answer ALL unit-test questions in ONE OpenAI call. The candidate image
+    is sent exactly once and every question is enumerated 0..N-1; the model
+    returns a JSON array of answers keyed by id. Trades per-question isolation
+    for ~1/N the image cost. used_cache is always False (single call)."""
+    err = _ensure_openai_key()
+    if err is not None:
+        raise RuntimeError("OPENAI_API_KEY missing")
+    imp = _import_openai()
+    if imp is None:
+        raise RuntimeError("openai package missing")
+    OpenAI, _ = imp
+
+    client = OpenAI()
+
+    def call(user_text: str) -> str:
+        started = time.perf_counter()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system",
+                 "content": UNIT_TEST_BATCH_SYSTEM_PROMPT},
+                {"role": "user", "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": _b64_data_url(candidate_bytes)}},
+                    {"type": "text", "text": user_text},
+                ]},
+            ],
+            response_format={"type": "json_object"},
+            **_reasoning_kwargs(reasoning_effort),
+        )
+        usage = getattr(response, "usage", None)
+        record_usage(workdir, phase=6, source="openai-vision", model=model,
+                     duration_secs=time.perf_counter() - started,
+                     basis="tokens",
+                     input_tokens=getattr(usage, "prompt_tokens", None),
+                     output_tokens=getattr(usage, "completion_tokens", None))
+        return response.choices[0].message.content or ""
+
+    return _run_unit_tests_single(label=model, questions=questions, call=call,
+                                  max_retries=max_retries)
 
 
 # --- Gemini single-call backend for Stage B ----------------------------------
@@ -1235,91 +1298,86 @@ def _run_unit_tests_gemini_single(
     from google.genai import types  # type: ignore
 
     client = genai.Client()
-    numbered = "\n".join(f"{i}. {q['question']}" for i, q in enumerate(questions))
-    user_text = (
-        "Answer every question below about the CANDIDATE image. Return one "
-        "entry per question, keyed by the question number shown before each "
-        "question.\n\n" + numbered
-    )
 
-    answers_by_id: dict[int, dict] = {}
-    last_error: str | None = None
-    print(f"unit-tests: single {model} call for {len(questions)} question(s) "
-          f"(image sent once) ...")
-    for _ in range(max_retries + 1):
-        try:
-            started = time.perf_counter()
-            result = client.models.generate_content(
-                model=model,
-                contents=[
-                    types.Part.from_bytes(
-                        data=candidate_bytes, mime_type="image/jpeg",
-                    ),
-                    types.Part.from_text(text=user_text),
-                ],
-                config=types.GenerateContentConfig(
-                    system_instruction=UNIT_TEST_BATCH_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    temperature=0,
+    def call(user_text: str) -> str:
+        started = time.perf_counter()
+        result = client.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_bytes(
+                    data=candidate_bytes, mime_type="image/jpeg",
                 ),
-            )
-            meta = getattr(result, "usage_metadata", None)
-            record_usage(workdir, phase=6, source="gemini-vision", model=model,
-                         duration_secs=time.perf_counter() - started,
-                         basis="tokens",
-                         input_tokens=getattr(meta, "prompt_token_count", None),
-                         output_tokens=getattr(meta, "candidates_token_count", None))
-            raw = (result.text or "").strip()
-            obj = json.loads(raw)
-            arr = obj.get("answers")
-            if isinstance(arr, list):
-                for entry in arr:
-                    if not isinstance(entry, dict):
-                        continue
-                    eid = entry.get("id")
-                    ans = entry.get("answer")
-                    rat = entry.get("rationale", "")
-                    if isinstance(ans, str):
-                        ans = ans.strip().lower()
-                    if (isinstance(eid, int) and ans in VALID_YES_NO
-                            and isinstance(rat, str)):
-                        answers_by_id[eid] = {"answer": ans, "rationale": rat}
-                if answers_by_id:
-                    break
-            last_error = f"unexpected shape: {obj!r}"
-        except Exception as exc:
-            last_error = repr(exc)
+                types.Part.from_text(text=user_text),
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=UNIT_TEST_BATCH_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0,
+            ),
+        )
+        meta = getattr(result, "usage_metadata", None)
+        record_usage(workdir, phase=6, source="gemini-vision", model=model,
+                     duration_secs=time.perf_counter() - started,
+                     basis="tokens",
+                     input_tokens=getattr(meta, "prompt_token_count", None),
+                     output_tokens=getattr(meta, "candidates_token_count", None))
+        return result.text or ""
 
-    results: list[dict] = []
-    for i, q in enumerate(questions):
-        a = answers_by_id.get(i)
-        if a is None:
-            results.append({
-                "panel_id": q["panel_id"],
-                "question": q["question"],
-                "expected_answer": q["expected_answer"],
-                "actual_answer": None,
-                "rationale": (f"FAILED: no answer returned for question {i}"
-                              + (f" ({last_error})" if last_error else "")),
-                "pass": False,
-                "error": True,
-                "source_file": q["source_file"],
-                "line": q["line"],
-            })
-            continue
-        passed = a["answer"] == q["expected_answer"]
-        results.append({
-            "panel_id": q["panel_id"],
-            "question": q["question"],
-            "expected_answer": q["expected_answer"],
-            "actual_answer": a["answer"],
-            "rationale": a["rationale"],
-            "pass": passed,
-            "error": False,
-            "source_file": q["source_file"],
-            "line": q["line"],
-        })
-    return results, False
+    return _run_unit_tests_single(label=model, questions=questions, call=call,
+                                  max_retries=max_retries)
+
+
+# --- Codex app-server (ChatGPT-subscription) backends via the broker --------
+#
+# Stage A and the single-call Stage B probes run as read-only, no-tool Codex
+# turns through the orchestrator's broker (scripts/_codex_broker.py). Unlike
+# `codex exec`, this works from inside the coding agent's sandbox and needs no
+# API key; structured output pins the reply to the validators' schema.
+
+
+def _stage_a_codex_app_server(*, prompt: str, reference_bytes: bytes,
+                              candidate_bytes: bytes, attempt: int,
+                              workdir: Path,
+                              reasoning_effort: str | None = None) -> str | int:
+    """Run the content audit through the Codex broker. Returns raw JSON text,
+    or an int exit code on error."""
+    from _codex_broker import CodexBrokerError, ask_vision  # noqa: E402
+
+    print(f"calling codex-app-server (attempt={attempt}) ...")
+    try:
+        return ask_vision(workdir, instructions=prompt, schema=VERDICT_SCHEMA,
+                          effort=reasoning_effort, phase=6, parts=[
+            "REFERENCE — deterministic draw.io export. Helper only: use it to "
+            "disambiguate symbols you cannot read in the candidate. The "
+            "reference is NOT authoritative — the candidate may add, remove, "
+            "or rearrange visual elements freely.",
+            reference_bytes,
+            "CANDIDATE — the image-model restyle. Audit it against METHODS for "
+            "truth and against itself for understandability, and return JSON "
+            "only.",
+            candidate_bytes,
+        ])
+    except CodexBrokerError as exc:
+        print(f"ERROR: Codex broker call failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_unit_tests_codex_app_server_single(
+    *, candidate_bytes: bytes, questions: list[dict], workdir: Path,
+    reasoning_effort: str | None = None,
+) -> tuple[list[dict], bool]:
+    """Answer ALL unit-test questions in ONE Codex broker turn (the analog of
+    `openai-single`), candidate image sent once."""
+    from _codex_broker import ask_vision  # noqa: E402
+
+    def call(user_text: str) -> str:
+        return ask_vision(workdir, parts=[candidate_bytes, user_text],
+                          instructions=UNIT_TEST_BATCH_SYSTEM_PROMPT,
+                          schema=BATCH_ANSWERS_SCHEMA,
+                          effort=reasoning_effort, phase=6)
+
+    return _run_unit_tests_single(label="codex-app-server", questions=questions,
+                                  call=call)
 
 
 # --- Codex (ChatGPT-subscription) backend for Stage B ------------------------
@@ -1607,6 +1665,13 @@ def _call_backend(*, vlm: str, model: str, prompt: str,
             reference_bytes=reference_bytes, candidate_bytes=candidate_bytes,
             attempt=attempt, workdir=workdir,
         )
+    elif backend == "codex-app-server":
+        raw_or_err = _stage_a_codex_app_server(
+            prompt=prompt,
+            reference_bytes=reference_bytes, candidate_bytes=candidate_bytes,
+            attempt=attempt, workdir=workdir,
+            reasoning_effort=reasoning_effort,
+        )
     else:
         print(f"ERROR: unknown backend {backend!r} for --audit-vlm {vlm!r}",
               file=sys.stderr)
@@ -1671,6 +1736,9 @@ def _call_backend(*, vlm: str, model: str, prompt: str,
             ut_effort = VLM_REGISTRY[DEFAULT_OPENAI_VLM].get("reasoning_effort")
         elif eff_ut_backend in ("gemini", "gemini-single") and backend != "gemini":
             ut_model = VLM_REGISTRY["gemini-3.1-pro"]["model"]
+        elif eff_ut_backend == "codex-app-server" and backend != "codex-app-server":
+            ut_model = VLM_REGISTRY["codex-app-server"]["model"]
+            ut_effort = VLM_REGISTRY["codex-app-server"].get("reasoning_effort")
         ut_conc = unit_test_concurrency
         ut_model_label = ut_model
         if eff_ut_backend == "codex":
@@ -1679,7 +1747,7 @@ def _call_backend(*, vlm: str, model: str, prompt: str,
             # request — so don't fan out as wide unless asked explicitly.
             if unit_test_concurrency == DEFAULT_UT_CONCURRENCY:
                 ut_conc = DEFAULT_CODEX_CONCURRENCY
-        if eff_ut_backend in ("openai-single", "gemini-single"):
+        if eff_ut_backend in ("openai-single", "gemini-single", "codex-app-server"):
             print(f"unit-tests: answering {len(unit_tests)} question(s) in ONE "
                   f"{ut_model} call (candidate image sent once)")
         else:
@@ -1700,6 +1768,13 @@ def _call_backend(*, vlm: str, model: str, prompt: str,
                     candidate_bytes=candidate_bytes,
                     questions=unit_tests,
                     workdir=workdir,
+                )
+            elif eff_ut_backend == "codex-app-server":
+                ut_results, ut_cached = _run_unit_tests_codex_app_server_single(
+                    candidate_bytes=candidate_bytes,
+                    questions=unit_tests,
+                    workdir=workdir,
+                    reasoning_effort=ut_effort,
                 )
             elif eff_ut_backend == "codex":
                 ut_results, ut_cached = asyncio.run(

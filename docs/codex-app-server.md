@@ -24,12 +24,14 @@ inherited. A supported custom model-provider/API-key configuration remains
 Codex's responsibility. The adapter does not implement OAuth, extract tokens,
 or turn a ChatGPT session into an API key.
 
-Start with the separate image-restyle and vision-audit phases disabled:
+A complete run needs no `OPENAI_API_KEY`: with this agent, the image restyle,
+the vision audits and the unit tests also default to the ChatGPT subscription
+through the run's [Codex broker](#codex-broker-audits-unit-tests-and-enhance):
 
 ```sh
 node dist/cli.js /path/to/paper.tex \
   --prompt "Create an editable diagram of the method." \
-  --agent codex-app-server --mode light --skip-enhance
+  --agent codex-app-server --mode light
 ```
 
 `--model <model-id>` overrides the thread model. `--effort low|medium|high|xhigh`
@@ -44,14 +46,16 @@ still supplies correction-loop budgets.
 | --- | --- | --- |
 | `AUTOILLUSTRATE_CODEX_BIN` | `codex` | One executable path or PATH name, not shell arguments. |
 | `AUTOILLUSTRATE_CODEX_RPC_TIMEOUT` | `30` | Seconds to await each `initialize`, `thread/start`, or `turn/start` response. |
-| `AUTOILLUSTRATE_CODEX_NETWORK_ACCESS` | `1` | `0` requests disabled tool network access in the turn sandbox; `1` enables it. |
+| `AUTOILLUSTRATE_CODEX_NETWORK_ACCESS` | `1` | `0` requests disabled tool network access in the turn sandbox; `1` enables it. Broker-backed audits need `1`. |
+| `AUTOILLUSTRATE_CODEX_VISION_MODEL` | Codex config | Model for the broker's audit/unit-test turns. |
 | `AGENT_INVOKE_TIMEOUT` | `7200` | Overall sub-agent deadline, including startup. |
 
 Timeouts must be positive, finite and within Node's timer range. RPC deadlines
 are independent of the overall deadline and are not reset by notifications.
 Export these settings; the existing `.env` loader only loads API credentials.
 The network default preserves the original provider's behavior for tools that
-call separate image/audit APIs.
+call separate image/audit APIs, and lets the agent's scripts reach the loopback
+broker. Preflight rejects `0` when sub-agents would need the broker.
 
 Executable paths containing spaces are supported:
 
@@ -67,9 +71,10 @@ fall back to another Codex installation. Doctor performs a bounded, five-second
 `app-server --help` probe, not merely a PATH check. This proves neither account
 authentication nor model access; the runtime handshake remains authoritative.
 
-Doctor skips Headless for this provider. Its other checks remain an inventory,
-so it can still report missing API keys that an agent-only run does not need.
-Scoped pipeline preflight continues to gate only the requested backends.
+Doctor skips Headless and `OPENAI_API_KEY` for this provider, whose default
+backends need no API key. Scoped pipeline preflight gates only the requested
+backends; for broker backends it probes the app-server executable and checks
+its `codex login status`.
 `credentials` continues to check the default `codex` executable; use the custom
 binary's `login status` directly when an override is configured.
 
@@ -83,17 +88,66 @@ lives in `codex-app-server-agent.ts`; the legacy Headless execution path is
 unchanged. Parallel calls have independent processes, threads, logs and usage.
 Do not share one log path between concurrent invocations.
 
-`--enhance-model`, `--audit-vlm` and `--unit-test-vlm` remain independent.
-Selecting this coding agent does not reroute Python image/VLM API calls through
-app-server or remove their credential requirements. In particular, the custom
-executable override does not retarget `--enhance-model codex`,
-`--unit-test-vlm codex`, or legacy `--agent codex`.
+`--enhance-model`, `--audit-vlm` and `--unit-test-vlm` stay independently
+selectable. This agent only changes their defaults to `codex-app-server`,
+`codex-app-server` and `auto`; an explicit flag or an exported `AUDIT_VLM` /
+`UNIT_TEST_VLM` wins, and any agent may opt into the broker backends. The
+custom executable override applies to the broker but does not retarget
+`--enhance-model codex`, `--unit-test-vlm codex`, or legacy `--agent codex`.
+
+## Codex broker (audits, unit tests and enhance)
+
+The audits and the Phase 6 repair re-enhances run as Python scripts *inside*
+the agent's workspace-write sandbox, where a nested `codex exec` cannot start
+and where OAuth credentials must not be exposed. draw.io (Electron) also aborts
+there (SIGABRT under Seatbelt on macOS). The orchestrator therefore starts a
+broker for any run that selects a `codex-app-server` backend, and for every
+`--agent codex-app-server` run (`src/codex-broker.ts`):
+
+- It owns lazily started `codex app-server` stdio children outside the sandbox,
+  one for vision and one for image generation, using your existing Codex login.
+- It serves narrow operations on a `127.0.0.1` HTTP port guarded by a random
+  capability token: a vision turn (ordered text/image input, optional JSON
+  output schema), an image-generation turn, and — for a `codex-app-server`
+  agent only — a draw.io export. `autoillustrate export` inside that agent
+  (`AUTOILLUSTRATE_CODEX_BROKER` names the descriptor) delegates to it; the
+  orchestrator runs the usual hardened exporter, accepting only an existing
+  `.drawio` input and a `.png` output that resolve, after symlinks, inside the
+  run workdir. The URL and token are in `<workdir>/.codex-broker.json` (mode
+  0600, written exclusively), removed when the run ends or the process exits.
+- Each request is a fresh ephemeral thread with `approvalPolicy: "never"`, a
+  read-only no-network turn sandbox and an empty private working directory
+  under `~/.cache/autoillustrate/codex-broker/` (outside the temp roots the
+  agent can write). The children start with shell, unified exec, apps,
+  plugins, browser, computer use, memories, multi-agent, hooks and MCP servers
+  disabled, web search off and `tools.view_image=false`; the vision child also
+  disables image generation and the code-mode host. Image generation needs the
+  code-mode host, so the image child keeps it. Only feature names the binary
+  reports in `codex features list` are passed (Codex exits on unknown names).
+  In live checks both profiles refused to read files or view host images when
+  prompted to. The token grants these operations only, never a general
+  app-server connection. The children still use your `CODEX_HOME`
+  configuration (model, provider, global instructions).
+- Requests are bounded: 64 admitted at once (before the body is read), 64 MiB
+  bodies, turn input within one 16 MiB app-server frame (else 413), 8
+  concurrent turns, 4 concurrent exports, `AUTOILLUSTRATE_CODEX_RPC_TIMEOUT`
+  for `initialize`, and one 15-minute deadline covering `thread/start`,
+  `turn/start` and the turn (it sends `turn/interrupt`; a child that never
+  answers is replaced). A client that disconnects interrupts its turn.
+  Approval or input requests fail the request; nothing is approved.
+
+`scripts/_codex_broker.py` is the standard-library client. Audits use strict
+output schemas matching their validators and record usage to
+`metrics/api_usage.jsonl` with `basis: "subscription"` (tokens shown, no
+dollar cost). The broker is unrelated to any app-server you may already run
+(for example `codex app-server --listen ws://…`); it never connects to one.
 
 Resume uses existing pipeline artifacts and a fresh Codex thread, not a resumed
-Codex conversation. There is no connection pool, shared desktop session,
-WebSocket transport or new network listener. `--tmux` is rejected for this
+Codex conversation. The agent transport has no connection pool, shared desktop
+session or WebSocket transport; the only listener is the loopback broker above,
+started only for broker backends. `--tmux` is rejected for this
 provider. POSIX process groups are required; native Windows is rejected with a
-WSL recommendation. macOS has not been live-tested for this integration.
+WSL recommendation.
 
 ## Protocol and lifecycle
 
@@ -172,9 +226,11 @@ existing output-token convention.
 The focused tests use a local fake JSON-RPC process, not a model or account:
 
 ```sh
-node --import tsx --test tests/codex-app-server*.test.ts
+node --import tsx --test tests/codex-app-server*.test.ts tests/codex-broker*.test.ts tests/codex_broker_py.test.ts
 npm run check
 ```
+
+The broker and Python tests bind loopback ports; run them where that is allowed.
 
 Inspect `<workdir>/logs/` or use `--debug` for the raw trace. Authentication/model
 errors come from Codex; unsupported methods/fields indicate a protocol mismatch.

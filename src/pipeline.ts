@@ -5,18 +5,20 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { defaultTimeoutSecs } from "./agent.js";
+import { CODEX_APP_SERVER_AGENT } from "./codex-app-server.js";
+import { startCodexBroker, type BrokerExportRequest, type CodexBroker } from "./codex-broker.js";
 import {
-  DEFAULT_AUDIT_VLM,
-  DEFAULT_ENHANCE_MODEL,
   DEFAULT_ENHANCE_QUALITY,
   DEFAULT_ENHANCEMENT_ATTEMPTS,
   DEFAULT_PANEL_INSPECTS,
-  DEFAULT_UNIT_TEST_VLM,
-  enhanceBackend,
+  modelNeeds,
+  resolveModelBackends,
   type PhaseResult,
   type RunContext,
 } from "./context.js";
 import { PhaseError } from "./errors.js";
+import { TeeLog } from "./exec.js";
+import { exportDrawioPngRobust } from "./export-png.js";
 import {
   attachJournal,
   closeLogging,
@@ -202,53 +204,21 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
   const runsInspect = runsAgentPanels && panelInspects > 0; // phase 3 only
   const runsEnhance = !opts.skipEnhance && opts.resumePhase <= 5;
   const runsVerify = !opts.skipEnhance && enhancementAttempts > 1;
-  const enhanceModel = opts.enhanceModel ?? DEFAULT_ENHANCE_MODEL;
   const enhanceQuality = opts.enhanceQuality ?? DEFAULT_ENHANCE_QUALITY;
-  const enhanceNeedsGemini = enhanceBackend(enhanceModel) === "gemini";
-  const enhanceNeedsCodex = enhanceBackend(enhanceModel) === "codex";
 
   // The vision audits don't unconditionally need OpenAI: --audit-vlm (Phase 3
   // panel inspect + Phase 6 Stage A) and --unit-test-vlm (Phase 6 Stage B)
-  // each pick an OpenAI/Gemini/codex backend, exported as $AUDIT_VLM /
-  // $UNIT_TEST_VLM (cli.ts). Resolve the effective choices — falling back to
-  // an already-exported env var, then the default — exactly as
-  // inspect_panel.py / verify.py do, and derive the credential needs from the
-  // backends so a Gemini-only audit run isn't rejected for a missing
+  // each pick an OpenAI/Gemini/codex/codex-app-server backend, exported as
+  // $AUDIT_VLM / $UNIT_TEST_VLM (cli.ts). Resolve the effective choices the
+  // way the scripts do and derive the credential needs from the backends, so
+  // a Gemini-only or broker-only run isn't rejected for a missing
   // OPENAI_API_KEY (and a Gemini audit can't start without GEMINI_API_KEY).
-  // 'auto' unit-tests follow the audit backend (verify.py:799). Keep the
-  // backend mapping in sync with VLM_REGISTRY / UT_BACKEND_CHOICES.
-  const auditVlm = baseEnv.AUDIT_VLM ?? DEFAULT_AUDIT_VLM;
-  const unitTestVlm = baseEnv.UNIT_TEST_VLM ?? DEFAULT_UNIT_TEST_VLM;
-  const auditBackend = auditVlm === "gemini-3.1-pro" ? "gemini" : "openai";
-  const unitTestBackend =
-    unitTestVlm === "auto"
-      ? auditBackend
-      : unitTestVlm.startsWith("gemini")
-        ? "gemini"
-        : unitTestVlm === "codex"
-          ? "codex"
-          : "openai";
-  // Phase 3 inspect + Phase 6 Stage A both consume the audit VLM; Phase 6
-  // Stage B unit tests consume the unit-test VLM (verify only). --panel-inspects
-  // 0 drops the Phase 3 consumer, so a 0-inspect, 0-verify run needs no audit key.
+  // --panel-inspects 0 drops the Phase 3 consumer, so a 0-inspect, 0-verify
+  // run needs no audit backend at all.
+  const backends = resolveModelBackends(opts.agent, baseEnv, opts.enhanceModel);
+  const { enhanceModel, auditVlm, unitTestVlm } = backends;
   const auditRuns = runsInspect || runsVerify;
-
-  const needsOpenai =
-    (auditRuns && auditBackend === "openai") ||
-    (runsVerify && unitTestBackend === "openai") ||
-    (runsEnhance && !enhanceNeedsGemini && !enhanceNeedsCodex);
-  const needsGemini =
-    (auditRuns && auditBackend === "gemini") ||
-    (runsVerify && unitTestBackend === "gemini") ||
-    (runsEnhance && enhanceNeedsGemini);
-  // Only Phase 5 enhance hard-requires the codex CLI: enhance.py aborts if it
-  // is absent (no fallback). The codex *unit-test* backend is deliberately NOT
-  // required — verify.py falls back to the audit backend ('openai-single' when
-  // Stage A is OpenAI, else the Stage A backend itself) when codex is missing
-  // (verify.py:1627), and that fallback's credential is already mandated above
-  // via auditRuns. Demanding the CLI here would wrongly reject a supported
-  // `--unit-test-vlm codex` run that has a valid audit-backend key.
-  const needsCodexCli = runsEnhance && enhanceNeedsCodex;
+  const { needsOpenai, needsGemini, needsCodexCli, needsCodexBroker, codexBrokerFromAgents } = modelNeeds(backends, { runsInspect, runsVerify, runsEnhance });
 
   if (
     !preflight(
@@ -258,6 +228,8 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
         needsOpenai,
         needsGemini,
         needsCodexCli,
+        needsCodexBroker,
+        codexBrokerFromAgents,
       },
       baseEnv,
       opts.cwd,
@@ -281,6 +253,10 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
   // as Phase 5 without the sub-agent having to repeat the flags.
   env.ENHANCE_MODEL = enhanceModel;
   env.ENHANCE_QUALITY = enhanceQuality;
+  // Always export the resolved audit choices: the scripts' own fallback is the
+  // API default, which would silently diverge from an agent-aware default.
+  env.AUDIT_VLM = auditVlm;
+  env.UNIT_TEST_VLM = unitTestVlm;
 
   const ctx: RunContext = {
     workdir,
@@ -543,7 +519,27 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
     logPhaseEnd({ phase: phase.n, title: phase.name, status: "skipped", outcome: reason });
   };
 
+  // The Codex broker serves the codex-app-server audit/unit-test/enhance
+  // backends to the scripts (including those the sandboxed sub-agents run).
+  // A codex-app-server agent always gets one: draw.io (Electron) aborts in its
+  // Seatbelt sandbox, so `autoillustrate export` there delegates the export to
+  // this process. It must outlive every phase and is torn down on every exit path.
+  const sandboxedAgent = opts.agent === CODEX_APP_SERVER_AGENT;
+  const exportOutsideSandbox = async (req: BrokerExportRequest): Promise<void> => {
+    const tee = new TeeLog(`${req.pngOut}.export.log`);
+    try {
+      await exportDrawioPngRobust({ ...req, tee, env, directAttempts: 1, directTimeoutSecs: 60 });
+    } finally {
+      await tee.close();
+    }
+  };
+  let broker: CodexBroker | undefined;
   try {
+    if (needsCodexBroker || sandboxedAgent) {
+      broker = await startCodexBroker({ workdir, env, exportDrawio: sandboxedAgent ? exportOutsideSandbox : undefined });
+      // ctx.env is this same object: every later phase and sub-agent sees it.
+      if (sandboxedAgent) env.AUTOILLUSTRATE_CODEX_BROKER = broker.descriptorPath;
+    }
     for (const [i, phase] of phases.entries()) {
       // Skip-flag early exits before phases 5 and 6 (run.sh:299-303, 316-320).
       // The stopped-before phases are announced (not recorded as metrics rows,
@@ -619,6 +615,8 @@ async function runPipelineInner(opts: PipelineOptions): Promise<number> {
     const code = failed(err);
     finalize("failed");
     return code;
+  } finally {
+    await broker?.close();
   }
 
   const verdict = readJsonString(path.join(workdir, "phase6_report.json"), "summary");

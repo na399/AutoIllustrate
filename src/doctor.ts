@@ -357,8 +357,10 @@ function redactEmails(line: string): string {
   return line.replace(/\S+@\S+/g, "[redacted]");
 }
 
-export function checkCodexAuth(env: NodeJS.ProcessEnv = process.env, timeoutMs = 10_000): CheckResult {
-  const found = which("codex", env);
+// `command` lets a caller verify the executable it will actually run (the
+// broker honours AUTOILLUSTRATE_CODEX_BIN) instead of the first PATH hit.
+export function checkCodexAuth(env: NodeJS.ProcessEnv = process.env, timeoutMs = 10_000, command: string | null = which("codex", env)): CheckResult {
+  const found = command;
   if (!found) {
     return {
       name: "codex CLI",
@@ -473,7 +475,9 @@ export function allChecks(agent: string, env: NodeJS.ProcessEnv = process.env): 
     checkDrawioExport(env),
     ...(agent === CODEX_APP_SERVER_AGENT ? [] : [checkHeadless(env)]),
     checkAgentCli(agent, env),
-    checkOpenaiKey(env),
+    // codex-app-server's default audit/unit-test/enhance backends run on the
+    // ChatGPT subscription through the Codex broker: no API key by default.
+    ...(agent === CODEX_APP_SERVER_AGENT ? [] : [checkOpenaiKey(env)]),
   ];
 }
 
@@ -496,7 +500,7 @@ export function runDoctor(agent: string, env: NodeJS.ProcessEnv = process.env): 
 const CREDENTIAL_USAGE: Record<string, string> = {
   OPENAI_API_KEY: "Phases 3/6 gpt-6-astra audit/unit-test + Phase 5 gpt-image-2.5-sunburst",
   GEMINI_API_KEY: "Phase 5 nanobanana* + Phases 3/6 gemini-3.1-pro audit/unit-test",
-  "codex CLI": "Phase 5 codex + Phase 6 codex unit-test; default codex-app-server executable",
+  "codex CLI": "Phase 5 codex + Phase 6 codex unit-test; codex-app-server agent + broker audits/enhance",
   "Claude Code": "Phases 1/2/3/6 agent (default --agent claude)",
 };
 
@@ -524,6 +528,8 @@ export interface PreflightNeeds {
   needsOpenai: boolean; // an OpenAI-backed audit/unit-test VLM (Phases 3/6) or enhance model (Phase 5) will run
   needsGemini?: boolean; // a Gemini-backed audit/unit-test VLM (Phases 3/6) or nanobanana enhance model (Phase 5) will run
   needsCodexCli?: boolean; // the codex enhance model (Phase 5) will run — NOT the codex unit-test VLM, which falls back to the audit backend (verify.py:1627)
+  needsCodexBroker?: boolean; // a codex-app-server audit/unit-test/enhance backend will run through the Codex broker
+  codexBrokerFromAgents?: boolean; // ...and some of those calls come from sub-agents (Phases 3/6), not the orchestrator
 }
 
 // Collect ALL failures, print remediations, return false if any (cli exits 2).
@@ -537,6 +543,22 @@ export function preflight(
   if (needs.needsOpenai) checks.push(checkOpenaiKey(env, cwd));
   if (needs.needsGemini) checks.push(checkGeminiKey(env, cwd));
   if (needs.needsCodexCli) checks.push(checkCodexCli(env));
+  if (needs.needsCodexBroker) {
+    // The broker runs the same app-server executable as the native agent; skip
+    // the duplicate probe when the agent check above already covered it.
+    if (!(needs.needsAgentPhases && needs.agent === CODEX_APP_SERVER_AGENT)) checks.push(checkCodexAppServerCli(env));
+    // The broker has no API-key fallback: it needs a ChatGPT login up front.
+    checks.push(checkCodexAuth(env, 10_000, findCodexAppServer(env)));
+    // Scripts inside a codex-app-server agent's turn reach the loopback broker
+    // over the socket layer, which the no-network turn sandbox blocks.
+    if (needs.codexBrokerFromAgents && needs.agent === CODEX_APP_SERVER_AGENT && env.AUTOILLUSTRATE_CODEX_NETWORK_ACCESS === "0") {
+      checks.push({
+        name: "codex broker", ok: false,
+        detail: "AUTOILLUSTRATE_CODEX_NETWORK_ACCESS=0 blocks the agent's scripts from the loopback Codex broker",
+        hint: "unset it (or set 1), or pick non-broker --audit-vlm / --unit-test-vlm / --enhance-model backends",
+      });
+    }
+  }
   const failures = checks.filter((c) => !c.ok);
   for (const f of failures) {
     logErr("preflight", `${f.name}: ${f.detail}${f.hint ? ` — ${f.hint}` : ""}`);

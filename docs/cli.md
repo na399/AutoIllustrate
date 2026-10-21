@@ -46,12 +46,15 @@ autoillustrate export <in.drawio> <out.png> [--export-width <px> | --export-scal
 
 ```
     --enhance-model <m>   gpt-image-2.5-sunburst | gpt-image-2 | nanobanana
-                          | nanobanana-pro | codex | <model id>
-                          (default: gpt-image-2.5-sunburst). Image model for
+                          | nanobanana-pro | codex | codex-app-server
+                          | <model id> (default: gpt-image-2.5-sunburst;
+                          codex-app-server with --agent codex-app-server). Image model for
                           the Phase 5 restyle; nanobanana = Gemini 3.1 Flash
                           Image, nanobanana-pro = Gemini 3 Pro Image (both need
                           GEMINI_API_KEY); codex = the codex CLI's $imagegen
-                          skill (needs a ChatGPT-authenticated codex CLI). Any
+                          skill (needs a ChatGPT-authenticated codex CLI);
+                          codex-app-server = image generation through the run's
+                          Codex broker (ChatGPT subscription, no API key). Any
                           other id is passed through unchanged: gemini-* to the
                           Gemini API, everything else to the OpenAI Images API.
     --enhance-quality <q> Output quality of the Phase 5 restyle and of the
@@ -60,15 +63,18 @@ autoillustrate export <in.drawio> <out.png> [--export-width <px> | --export-scal
                           model's own: gpt-image-2.5-* take low | medium | high
                           | xhigh | max | auto, gpt-image-2 has no xhigh or max,
                           the nanobanana models take the same ladder or a
-                          literal 1K | 2K | 4K (capped per model), and codex
-                          ignores it.
-    --audit-vlm <m>       gpt-6-astra | gpt-5.5 | gemini-3.1-pro (default:
-                          gpt-6-astra, at high reasoning effort). Vision
+                          literal 1K | 2K | 4K (capped per model), and codex /
+                          codex-app-server ignore it.
+    --audit-vlm <m>       gpt-6-astra | gpt-5.5 | gemini-3.1-pro | codex-app-server
+                          (default: gpt-6-astra, at high reasoning effort;
+                          codex-app-server — Codex's model via the run's broker,
+                          no API key — with --agent codex-app-server). Vision
                           model for the content audits — Phase 3 panel inspect
                           and Phase 6 verify Stage A (one shared knob). Sets
                           $AUDIT_VLM for the sub-agents.
     --unit-test-vlm <b>   auto | openai | openai-single | gemini | gemini-single
-                          | codex (default: openai-single). Backend for the
+                          | codex | codex-app-server (default: openai-single;
+                          auto with --agent codex-app-server). Backend for the
                           Phase 6 Stage B unit-test probes, independent of
                           --audit-vlm. '*-single' answers all questions in one
                           call (cheapest); the others fan out one call per
@@ -159,9 +165,11 @@ export                    Hardened drawio → PNG export; see "Export
                           reliability" below.
 ```
 
-Headless is not checked for `doctor --agent codex-app-server`. The doctor
-probe verifies the selected executable supports `app-server --help` (bounded to five seconds).
-It does not verify authentication or model access. The report is an inventory; its API-key checks also cover separate image/audit backends.
+Headless and `OPENAI_API_KEY` are not checked for `doctor --agent codex-app-server`,
+whose default image/audit backends run through the Codex broker without an API key.
+The doctor probe verifies the selected executable supports `app-server --help` (bounded to five seconds).
+It does not verify authentication or model access; a run's preflight checks `codex login status`
+whenever a `codex-app-server` backend is selected.
 
 ## Environment variables
 
@@ -169,7 +177,8 @@ It does not verify authentication or model access. The report is an inventory; i
 |----------|--------|
 | `AUTOILLUSTRATE_CODEX_BIN` | Codex executable path or PATH name for `--agent codex-app-server` only (default `codex`). Not a shell command. |
 | `AUTOILLUSTRATE_CODEX_RPC_TIMEOUT` | Per-startup-request deadline in seconds for `codex-app-server` (default 30); notification traffic does not reset it. |
-| `AUTOILLUSTRATE_CODEX_NETWORK_ACCESS` | `0` disables network in the app-server turn sandbox; `1` enables it (default). Not host-process/network isolation. |
+| `AUTOILLUSTRATE_CODEX_NETWORK_ACCESS` | `0` disables network in the app-server turn sandbox; `1` enables it (default). Not host-process/network isolation. Broker-backed audits run from the agent need `1`. |
+| `AUTOILLUSTRATE_CODEX_VISION_MODEL` | Model for the `codex-app-server` audit/unit-test turns (default: Codex's configured model). |
 | `AGENT_INVOKE_TIMEOUT` | Per-sub-agent watchdog in seconds (default 7200). |
 | `AUTOILLUSTRATE_CMD_TIMEOUT` | Watchdog in seconds for deterministic python/drawio steps (default 600). A wedged drawio export fails the phase instead of hanging forever. |
 | `AUTOILLUSTRATE_CHROME` | Chrome/Chromium binary for the export fallback (auto-detected by default). |

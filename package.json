@@ -34,6 +34,7 @@
   },
   "files": [
     "dist",
+    "scripts/_codex_broker.py",
     "scripts/_usage.py",
     "scripts/check_params_contract.py",
     "scripts/compose.py",

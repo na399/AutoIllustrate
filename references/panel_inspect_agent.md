@@ -177,11 +177,13 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
 1. **Run the initial inspect** —
 
    ```bash
-   # Default audit-vlm is gpt-6-astra (OpenAI backend, high reasoning effort) → needs OPENAI_API_KEY.
-   # ($AUDIT_VLM, shared with the Phase 6 verify audit, sets this default.)
-   # For the fallback, add `--audit-vlm gemini-3.1-pro` and set GEMINI_API_KEY.
+   # The audit VLM comes from $AUDIT_VLM (shared with the Phase 6 verify
+   # audit; the orchestrator exports it): gpt-6-astra / gpt-5.5 need
+   # OPENAI_API_KEY, gemini-3.1-pro needs GEMINI_API_KEY, and
+   # codex-app-server needs no key (the orchestrator's Codex broker serves it).
+   # Any key the backend needs is already in your environment.
    # $PYTHON = the absolute interpreter path from your dispatch header.
-   OPENAI_API_KEY=... "$PYTHON" \
+   "$PYTHON" \
        "$TOOLKIT_DIR/scripts/inspect_panel.py" \
        --workdir $WORKDIR/ --panel-id <panel_id> --attempt 1
    ```

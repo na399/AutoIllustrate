@@ -53,7 +53,8 @@ so one setting covers both vision-audit stages). `gemini-3.1-pro` is
 available as a fallback. The backend choice picks both the API client
 and the credential the script expects (`OPENAI_API_KEY` for OpenAI,
 `GEMINI_API_KEY` for Gemini); either key may be supplied via env or
-via a `.env` file in the cwd.
+via a `.env` file in the cwd. `codex-app-server` needs no key: it calls
+the Codex broker that a pipeline run publishes in the workdir.
 
 Usage:
 
@@ -96,7 +97,7 @@ from schema import (  # noqa: E402
 )
 
 # VLM choices exposed via --audit-vlm. Each maps to a backend ("openai" /
-# "gemini") and the canonical API model id. To add a third option,
+# "gemini" / "codex-app-server") and the canonical API model id. To add a third option,
 # add another row here AND extend the `if backend ==` dispatch in
 # `_run_pass`. DEFAULT_VLM reads $AUDIT_VLM — the SAME env var as verify.py's
 # Stage A audit — so the orchestrator's single --audit-vlm flag drives the
@@ -107,6 +108,10 @@ VLM_REGISTRY: dict[str, dict[str, str]] = {
                        "reasoning_effort": "high"},
     "gpt-5.5":        {"backend": "openai", "model": "gpt-5.5"},
     "gemini-3.1-pro": {"backend": "gemini", "model": "gemini-3.1-pro-preview"},
+    # ChatGPT subscription via the orchestrator's Codex broker (no API key);
+    # the model is Codex's configured default ($AUTOILLUSTRATE_CODEX_VISION_MODEL).
+    "codex-app-server": {"backend": "codex-app-server", "model": "codex-app-server",
+                         "reasoning_effort": "high"},
 }
 VLM_CHOICES = list(VLM_REGISTRY)
 
@@ -707,6 +712,30 @@ def _dimension_issues(panel_id: str, png_size: tuple[int, int],
     }]
 
 
+# Structured-output schema for the codex-app-server backend: exactly the
+# verdict shape the three pass prompts request (checked by _validate_verdict).
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "has_defects": {"type": "boolean"},
+        "issues": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"},
+                "element": {"type": "string"},
+                "description": {"type": "string"},
+                "severity": {"type": "string", "enum": sorted(VALID_SEVERITIES)},
+            },
+            "required": ["location", "element", "description", "severity"],
+            "additionalProperties": False,
+        }},
+        "summary": {"type": "string"},
+    },
+    "required": ["has_defects", "issues", "summary"],
+    "additionalProperties": False,
+}
+
+
 def _validate_verdict(obj: object) -> list[str]:
     errors: list[str] = []
     if not isinstance(obj, dict):
@@ -770,8 +799,8 @@ def _cli() -> int:
                         f"Choices: {', '.join(VLM_CHOICES)} "
                         f"(default: {DEFAULT_VLM}, from $AUDIT_VLM — shared "
                         f"with the Phase 6 verify audit). Determines both the "
-                        f"API backend (OpenAI vs Gemini) and the resolved "
-                        f"model id.")
+                        f"backend (OpenAI, Gemini, or the run's Codex broker) "
+                        f"and the resolved model id.")
     p.add_argument("--vlm", dest="vlm", choices=VLM_CHOICES,
                    default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--model", default=None,
@@ -1021,6 +1050,10 @@ def _call_backend(*, vlm: str, backend: str, model: str,
             client=client, types_module=types, workdir=workdir,
             source="gemini-vision", **kw
         )
+    elif backend == "codex-app-server":
+        run_pass = lambda **kw: _run_pass_codex_app_server(
+            workdir=workdir, reasoning_effort=reasoning_effort, **kw
+        )
     else:
         print(f"ERROR: unknown backend {backend!r} for --audit-vlm {vlm!r}",
               file=sys.stderr)
@@ -1259,6 +1292,30 @@ def _run_pass_gemini(*, client, types_module, model: str, system_prompt: str,
                  output_tokens=getattr(meta, "candidates_token_count", None))
     return _parse_and_validate(result.text or "",
                                check_name=check_name, raw_path=raw_path)
+
+
+def _run_pass_codex_app_server(*, model: str, system_prompt: str,
+                               png_bytes: bytes, panel_id: str, attempt: int,
+                               check_name: str, user_text: str, raw_path: Path,
+                               workdir: Path,
+                               reasoning_effort: str | None = None) -> tuple[dict, int | None]:
+    """Run one audit pass through the orchestrator's Codex broker (ChatGPT
+    subscription, read-only no-tool turn). Returns (verdict, error_or_None)."""
+    from _codex_broker import CodexBrokerError, ask_vision  # noqa: E402
+
+    print(
+        f"calling {model} (attempt={attempt}, check={check_name}) "
+        f"for panel `{panel_id}` ..."
+    )
+    try:
+        raw = ask_vision(workdir, parts=[user_text, png_bytes],
+                         instructions=system_prompt, schema=VERDICT_SCHEMA,
+                         effort=reasoning_effort, phase=3)
+    except CodexBrokerError as exc:
+        print(f"ERROR: Codex broker call ({check_name}) failed: {exc}",
+              file=sys.stderr)
+        return {}, 1
+    return _parse_and_validate(raw, check_name=check_name, raw_path=raw_path)
 
 
 def _reasoning_kwargs(effort: str | None) -> dict:

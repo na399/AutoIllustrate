@@ -10,15 +10,15 @@ import { parseArgs } from "node:util";
 
 import {
   AUDIT_VLMS,
-  DEFAULT_ENHANCE_MODEL,
   DEFAULT_ENHANCE_QUALITY,
   UNIT_TEST_VLMS,
+  agentBackendDefaults,
 } from "./context.js";
 import { DEFAULT_MODE, MODE_PRESETS, type Mode, resolveMode } from "./modes.js";
 import { runCredentials, runDoctor } from "./doctor.js";
 import { TeeLog } from "./exec.js";
+import { requestBrokerExport } from "./codex-broker.js";
 import { exportDrawioPngRobust } from "./export-png.js";
-import { PhaseError } from "./errors.js";
 import { configureLogging, type LogFormat } from "./log.js";
 import { toolkitDir } from "./paths.js";
 import { runPipeline, type PipelineOptions } from "./pipeline.js";
@@ -59,14 +59,18 @@ Speed presets:
 Figure options:
       --placement <p>       half-width | full-width | infer (default: infer — Phase 1 decides)
       --enhance-model <m>   gpt-image-2.5-sunburst | gpt-image-2 | nanobanana
-                            | nanobanana-pro | codex | <model id>
-                            (default: gpt-image-2.5-sunburst). Image
+                            | nanobanana-pro | codex | codex-app-server
+                            | <model id> (default: gpt-image-2.5-sunburst;
+                            codex-app-server with --agent codex-app-server). Image
                             model for the Phase 5 restyle; nanobanana* are
                             Google's Gemini image models and need
                             GEMINI_API_KEY; codex runs the codex CLI's
                             $imagegen skill (gpt-image-2 on the ChatGPT
                             subscription — needs a logged-in codex CLI, no
-                            API key). Any other id is passed through as-is:
+                            API key); codex-app-server generates through the
+                            run's Codex broker (ChatGPT subscription, no API
+                            key, works inside sandboxed agents too). Any other
+                            id is passed through as-is:
                             gemini-* to the Gemini API, the rest to the
                             OpenAI Images API.
       --enhance-quality <q> Output quality of the Phase 5 restyle and of the
@@ -77,16 +81,21 @@ Figure options:
                             xhigh | max | auto, gpt-image-2 has no xhigh
                             or max, the nanobanana models take the same
                             ladder or a literal 1K | 2K | 4K (capped per
-                            model), and codex ignores it.
+                            model), and codex / codex-app-server ignore it.
 
 Vision-audit options:
-      --audit-vlm <m>       gpt-6-astra | gpt-5.5 | gemini-3.1-pro (default:
-                            gpt-6-astra, at high reasoning effort).
+      --audit-vlm <m>       gpt-6-astra | gpt-5.5 | gemini-3.1-pro |
+                            codex-app-server (default: gpt-6-astra, at high
+                            reasoning effort; codex-app-server with --agent
+                            codex-app-server — Codex's model on the ChatGPT
+                            subscription via the run's broker, no API key).
                             Vision model for the content audits — Phase 3
                             panel inspect AND Phase 6 verify Stage A (one
                             shared knob). Sets $AUDIT_VLM for the sub-agents.
       --unit-test-vlm <b>   auto | openai | openai-single | gemini |
-                            gemini-single | codex (default: openai-single).
+                            gemini-single | codex | codex-app-server
+                            (default: openai-single; auto with --agent
+                            codex-app-server). codex-app-server is single-call.
                             Backend for Phase 6 Stage B unit-test probes,
                             independent of --audit-vlm. '*-single' answers all
                             questions in one call (cheapest); the others
@@ -191,8 +200,9 @@ Other:
 
 Environment:
   OPENAI_API_KEY            Required for Phases 3/6, and 5 unless a
-                            nanobanana or codex --enhance-model is
-                            selected (env or ./.env).
+                            nanobanana, codex or codex-app-server
+                            --enhance-model is selected (env or ./.env).
+                            Not needed by --agent codex-app-server's defaults.
   GEMINI_API_KEY            Required for Phase 5 with --enhance-model
                             nanobanana | nanobanana-pro (env or ./.env).
   AUDIT_VLM                 Vision model for the content audits — Phase 3
@@ -207,6 +217,10 @@ Environment:
                             (default: 30; separate from the inference watchdog).
   AUTOILLUSTRATE_CODEX_NETWORK_ACCESS  App-server tool network access: 0 | 1
                             (default: 1). Does not isolate the host process.
+                            The codex-app-server audits/enhance reach the
+                            run's loopback broker, so they need 1.
+  AUTOILLUSTRATE_CODEX_VISION_MODEL  Model for codex-app-server audits
+                            (default: Codex's configured model).
   AGENT_INVOKE_TIMEOUT      Per-sub-agent watchdog seconds (default: 7200).
   AUTOILLUSTRATE_CMD_TIMEOUT  Per-step watchdog seconds for deterministic
                             children like python/drawio (default: 600).
@@ -418,7 +432,8 @@ export function parseCli(argv: string[]): ParsedCli {
   if (resolved.agent === "gemini" && resolved.effort !== undefined) {
     throw new UsageError("--effort is not supported with --agent gemini");
   }
-  const enhanceModel = values["enhance-model"] ?? DEFAULT_ENHANCE_MODEL;
+  // codex-app-server defaults to the broker-served restyle (no API key).
+  const enhanceModel = values["enhance-model"] ?? agentBackendDefaults(resolved.agent).enhanceModel;
   if (enhanceModel.trim() === "") {
     throw new UsageError("--enhance-model must not be empty");
   }
@@ -543,6 +558,15 @@ async function runExport(opts: NonNullable<ParsedCli["export"]>): Promise<number
   configureLogging({ verbose: true });
   const tee = new TeeLog(`${opts.pngOut}.export.log`);
   try {
+    // Inside a codex-app-server agent, draw.io (Electron) aborts under the
+    // Seatbelt sandbox; the pipeline names its broker so the orchestrator
+    // performs the export outside the sandbox instead.
+    const broker = process.env.AUTOILLUSTRATE_CODEX_BROKER;
+    if (broker) {
+      await requestBrokerExport(broker, { drawioPath: path.resolve(opts.drawioPath), pngOut: path.resolve(opts.pngOut), widthPx: opts.widthPx, scale: opts.scale });
+      tee.announce("export", `wrote ${opts.pngOut} (via the Codex broker)`);
+      return 0;
+    }
     await exportDrawioPngRobust({
       drawioPath: opts.drawioPath,
       pngOut: opts.pngOut,
@@ -556,7 +580,7 @@ async function runExport(opts: NonNullable<ParsedCli["export"]>): Promise<number
     tee.announce("export", `wrote ${opts.pngOut}`);
     return 0;
   } catch (err) {
-    tee.err("export", err instanceof PhaseError ? err.message : String(err));
+    tee.err("export", err instanceof Error ? err.message : String(err));
     return 1;
   } finally {
     await tee.close();

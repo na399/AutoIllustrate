@@ -74,7 +74,7 @@ function packageVersion(): string {
 }
 const CLIENT_VERSION = packageVersion();
 const usageKeys = ["inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"];
-function usageTotals(value: unknown): CodexMessage | undefined {
+export function usageTotals(value: unknown): CodexMessage | undefined {
   const total = object(object(value)?.total);
   if (!total) return undefined;
   if (usageKeys.some((key) => Object.hasOwn(total, key) && count(total[key]) === undefined)) return undefined;
@@ -82,12 +82,89 @@ function usageTotals(value: unknown): CodexMessage | undefined {
   // A malformed/empty update must not erase previously reported accounting.
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
+// Cumulative app-server totals -> AutoIllustrate's accounting fields. Codex
+// counts cached input inside inputTokens; report the uncached remainder.
+export function normalizeCodexUsage(total: CodexMessage | undefined): CodexMessage {
+  const input = count(total?.inputTokens), cached = count(total?.cachedInputTokens), output = count(total?.outputTokens);
+  return {
+    inputTokens: input !== undefined && cached !== undefined && cached <= input ? input - cached : input,
+    cacheReadTokens: cached !== undefined && (input === undefined || cached <= input) ? cached : undefined,
+    cacheWriteTokens: count(total?.cacheWriteInputTokens), outputTokens: output,
+    reasoningOutputTokens: count(total?.reasoningOutputTokens), totalTokens: count(total?.totalTokens),
+  };
+}
 
-export class CodexAppServerSession {
+// Bounded newline framing with strict UTF-8, shared by every app-server client
+// (this single-turn session and the multiplexed broker connection).
+export class CodexLineDecoder {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private lineBuffer: Buffer = Buffer.alloc(0);
   private lineBytes = 0;
-  private inputEnded = false;
+  private ended = false;
+
+  constructor(
+    private readonly onLine: (line: string) => void,
+    private readonly onError: (error: string) => void,
+  ) {}
+
+  get closed(): boolean { return this.ended; }
+
+  push(chunk: Buffer): void {
+    if (this.ended) return;
+    let offset = 0;
+    while (offset < chunk.length && !this.ended) {
+      const newline = chunk.indexOf(10, offset);
+      const end = newline < 0 ? chunk.length : newline;
+      const segment = chunk.subarray(offset, end);
+      if (this.lineBytes + segment.length > CODEX_MAX_MESSAGE_BYTES) {
+        this.onError("app-server message exceeds 16 MiB");
+        this.stop();
+        return;
+      }
+      if (segment.length) {
+        const needed = this.lineBytes + segment.length;
+        if (needed > this.lineBuffer.length) {
+          // Geometric growth bounds memory even if every chunk is one byte;
+          // retaining millions of Buffer slices would not be a byte bound.
+          const grown = Buffer.allocUnsafe(Math.min(CODEX_MAX_MESSAGE_BYTES,
+            Math.max(65536, this.lineBuffer.length * 2, needed)));
+          this.lineBuffer.copy(grown, 0, 0, this.lineBytes);
+          this.lineBuffer = grown;
+        }
+        segment.copy(this.lineBuffer, this.lineBytes);
+        this.lineBytes = needed;
+      }
+      if (newline < 0) break;
+      this.flushLine();
+      offset = newline + 1;
+    }
+  }
+  private flushLine(): void {
+    const bytes = this.lineBuffer.subarray(0, this.lineBytes);
+    this.lineBytes = 0;
+    let line: string;
+    try { line = this.decoder.decode(bytes); }
+    catch {
+      this.onError("invalid UTF-8 on app-server stdout");
+      this.stop();
+      return;
+    }
+    this.onLine(line);
+  }
+  // Flush a final unterminated line, then stop accepting input.
+  end(): void {
+    if (this.ended) return;
+    if (this.lineBytes) this.flushLine();
+    this.stop();
+  }
+  stop(): void {
+    this.ended = true;
+    this.lineBuffer = Buffer.alloc(0); this.lineBytes = 0;
+  }
+}
+
+export class CodexAppServerSession {
+  private readonly lines = new CodexLineDecoder((line) => this.line(line), (error) => this.fail(error));
   private pending?: { id: number; method: string };
   private nextId = 1;
   private started = false;
@@ -134,56 +211,11 @@ export class CodexAppServerSession {
     this.write({ id, method, params });
   }
 
-  push(chunk: Buffer): void {
-    if (this.inputEnded) return;
-    let offset = 0;
-    while (offset < chunk.length && !this.inputEnded) {
-      const newline = chunk.indexOf(10, offset);
-      const end = newline < 0 ? chunk.length : newline;
-      const segment = chunk.subarray(offset, end);
-      if (this.lineBytes + segment.length > CODEX_MAX_MESSAGE_BYTES) {
-        this.fail("app-server message exceeds 16 MiB");
-        this.stopInput();
-        return;
-      }
-      if (segment.length) {
-        const needed = this.lineBytes + segment.length;
-        if (needed > this.lineBuffer.length) {
-          // Geometric growth bounds memory even if every chunk is one byte;
-          // retaining millions of Buffer slices would not be a byte bound.
-          const grown = Buffer.allocUnsafe(Math.min(CODEX_MAX_MESSAGE_BYTES,
-            Math.max(65536, this.lineBuffer.length * 2, needed)));
-          this.lineBuffer.copy(grown, 0, 0, this.lineBytes);
-          this.lineBuffer = grown;
-        }
-        segment.copy(this.lineBuffer, this.lineBytes);
-        this.lineBytes = needed;
-      }
-      if (newline < 0) break;
-      this.flushLine();
-      offset = newline + 1;
-    }
-  }
-  private flushLine(): void {
-    const bytes = this.lineBuffer.subarray(0, this.lineBytes);
-    this.lineBytes = 0;
-    let line: string;
-    try { line = this.decoder.decode(bytes); }
-    catch {
-      this.fail("invalid UTF-8 on app-server stdout");
-      this.stopInput();
-      return;
-    }
-    this.line(line);
-  }
-  private stopInput(): void {
-    this.inputEnded = true;
-    this.lineBuffer = Buffer.alloc(0); this.lineBytes = 0;
-  }
+  push(chunk: Buffer): void { this.lines.push(chunk); }
+  private stopInput(): void { this.lines.stop(); }
   end(): void {
-    if (this.inputEnded) return;
-    if (this.lineBytes) this.flushLine();
-    this.stopInput();
+    if (this.lines.closed) return;
+    this.lines.end();
     if (!this.result) this.fail("app-server closed stdout before the requested turn completed");
   }
   fail(error: string): void { this.finish({ code: 1, error: error.slice(0, 4096) }); }
@@ -343,15 +375,11 @@ export class CodexAppServerSession {
   }
   usageRecord(): CodexMessage {
     const total = this.tokenUsage;
-    const input = count(total?.inputTokens), cached = count(total?.cachedInputTokens), output = count(total?.outputTokens);
     return { type: "usage", usage: {
       agent: CODEX_APP_SERVER_AGENT, model: this.model, provider: this.provider,
       usageStatus: total && usageKeys.some((key) => count(total[key]) !== undefined) ? "reported" : "missing",
       pricingStatus: "missing",
-      inputTokens: input !== undefined && cached !== undefined && cached <= input ? input - cached : input,
-      cacheReadTokens: cached !== undefined && (input === undefined || cached <= input) ? cached : undefined,
-      cacheWriteTokens: count(total?.cacheWriteInputTokens), outputTokens: output,
-      reasoningOutputTokens: count(total?.reasoningOutputTokens), totalTokens: count(total?.totalTokens),
+      ...normalizeCodexUsage(total),
     } };
   }
 }

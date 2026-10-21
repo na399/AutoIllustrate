@@ -10,7 +10,9 @@ Defaults to OpenAI `gpt-image-2.5-sunburst`; Google's nanobanana models are
 available via `--model nanobanana` (Gemini 3.1 Flash Image) and
 `--model nanobanana-pro` (Gemini 3 Pro Image), and `--model codex`
 runs the codex CLI's built-in $imagegen skill (gpt-image-2 underneath,
-billed to the ChatGPT subscription — no API key). Any other model id
+billed to the ChatGPT subscription — no API key); `--model
+codex-app-server` generates through the pipeline run's Codex broker (same
+subscription, no API key, and usable from a sandboxed agent). Any other model id
 is passed through unchanged: `gemini*` ids go to the Gemini API, the
 rest to the OpenAI Images API. The deterministic
 `full_figure.png` is preserved untouched; the enhanced version is
@@ -27,10 +29,11 @@ Usage:
 
 Flags:
     --model        gpt-image-2.5-sunburst | gpt-image-2 | nanobanana
-                   | nanobanana-pro | codex | <model id>
+                   | nanobanana-pro | codex | codex-app-server | <model id>
                    (default: gpt-image-2.5-sunburst). Needs
-                   OPENAI_API_KEY, GEMINI_API_KEY, or a
-                   ChatGPT-authenticated `codex` CLI respectively.
+                   OPENAI_API_KEY, GEMINI_API_KEY, a
+                   ChatGPT-authenticated `codex` CLI, or a running
+                   pipeline's Codex broker respectively.
     --placement    half-width | full-width (required). Affects only
                    the prompt's label-sizing guidance, not the
                    output dimensions.
@@ -117,6 +120,11 @@ MODEL_REGISTRY: dict[str, dict[str, str]] = {
                        "max_image_size": "4K"},
     "codex":          {"backend": "codex",
                        "model": "gpt-image-2 (codex $imagegen)"},
+    # Image generation through the orchestrator's Codex broker (ChatGPT
+    # subscription, no API key). Unlike `codex`, it also works from inside a
+    # sandboxed Phase 6 repair agent, where a nested `codex exec` cannot start.
+    "codex-app-server": {"backend": "codex-app-server",
+                         "model": "codex app-server image generation"},
 }
 
 # Resolution cap for a Gemini model id that isn't in the registry — 2K is
@@ -800,7 +808,9 @@ def _cli() -> int:
                         "GEMINI_API_KEY instead of OPENAI_API_KEY. "
                         "codex = the codex CLI's $imagegen skill "
                         "(gpt-image-2; needs a ChatGPT-authenticated "
-                        "codex CLI, no API key). Any other id is passed "
+                        "codex CLI, no API key). codex-app-server = image "
+                        "generation through the pipeline run's Codex broker "
+                        "(no API key). Any other id is passed "
                         "through: gemini* to the Gemini API, the rest to "
                         "the OpenAI Images API.")
     p.add_argument("--size", default=None,
@@ -939,9 +949,9 @@ def _cli() -> int:
             size_note = f"matched to input {sent_w}x{sent_h}"
         size_desc = size
         quality_desc = args.quality
-        if backend == "codex":
-            size_note += "; prompt guidance only — codex $imagegen decides"
-            quality_desc = f"{args.quality} (ignored by codex $imagegen)"
+        if backend in ("codex", "codex-app-server"):
+            size_note += f"; prompt guidance only — {backend} image generation decides"
+            quality_desc = f"{args.quality} (ignored by {backend})"
 
     if args.dry_run:
         print(f"[dry-run] model:     {args.model} → {api_model} ({backend})")
@@ -969,6 +979,8 @@ def _cli() -> int:
         return _call_gemini(api_model, aspect, image_size, img_bytes, prompt, out_path, args.workdir)
     if backend == "codex":
         return _call_codex(size, img_bytes, prompt, out_path, args.workdir)
+    if backend == "codex-app-server":
+        return _call_codex_app_server(size, img_bytes, prompt, out_path, args.workdir)
     return _call_openai(api_model, size, args.quality, img_bytes, img_name, prompt, out_path, args.workdir)
 
 
@@ -1186,6 +1198,38 @@ def _call_codex(size: str, img_bytes: bytes, prompt: str, out_path: Path, workdi
                  duration_secs=time.perf_counter() - started,
                  basis="subscription")
     print(f"wrote {out_path} ({out_abs.stat().st_size / 1024:.1f} KB)")
+    return 0
+
+
+def _call_codex_app_server(size: str, img_bytes: bytes, prompt: str,
+                           out_path: Path, workdir) -> int:
+    """Restyle through the orchestrator's Codex broker: one image-generation
+    turn on a ChatGPT-authenticated app-server outside the agent sandbox."""
+    from _codex_broker import CodexBrokerError, generate_image
+
+    if workdir is None:
+        print("ERROR: --model codex-app-server needs --workdir (the run's "
+              "broker descriptor lives there).", file=sys.stderr)
+        return 2
+    brief = (
+        "Edit the attached reference image with image generation, restyling it "
+        "according to the brief below. Do not create an unrelated image.\n"
+        f"Target output size: approximately {size} pixels (match the reference "
+        "aspect ratio).\n\nRESTYLE BRIEF\n=============\n" + prompt
+    )
+    print(f"calling codex-app-server image generation (target ~{size}) ...")
+    try:
+        generated = generate_image(workdir, prompt=brief, image=img_bytes,
+                                   phase=resolve_phase(5))
+        out_path.resolve().write_bytes(_ensure_png(generated))
+    except CodexBrokerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"ERROR: codex-app-server output is not a decodable image: {exc}",
+              file=sys.stderr)
+        return 1
+    print(f"wrote {out_path} ({out_path.stat().st_size / 1024:.1f} KB)")
     return 0
 
 

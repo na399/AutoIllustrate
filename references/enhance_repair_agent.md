@@ -91,7 +91,7 @@ open-ended audit.
 - **Backend (default `openai-single`).** Stage B runs on `verify.py`'s
   `--unit-test-vlm` (default `openai-single`, overridable via
   `$UNIT_TEST_VLM` or
-  `--unit-test-vlm openai|openai-single|gemini|gemini-single|codex|auto`).
+  `--unit-test-vlm openai|openai-single|gemini|gemini-single|codex|codex-app-server|auto`).
   Stage A still uses `--audit-vlm`. The default `openai-single` answers ALL
   unit-test questions in **one** gpt-6-astra call: the candidate PNG is
   sent exactly once and the model returns a JSON array of answers
@@ -112,6 +112,12 @@ open-ended audit.
   isolation (each question is its own conversation: candidate PNG +
   fixed unit-test system prompt + the single question) and are
   bounded by `--unit-test-concurrency` (default 8).
+- **`codex-app-server` (single call, ChatGPT subscription).** Like
+  `openai-single` — every question in ONE call, candidate PNG sent once —
+  but served by the orchestrator's Codex broker as a read-only, no-tool
+  Codex turn. No API key; `auto` selects it when Stage A is
+  `--audit-vlm codex-app-server`. Unlike `codex`, it works from inside a
+  sandboxed agent.
 - **`gemini-single` (one call, all questions).** The Gemini analog of
   `openai-single`: every question is answered in **one** Gemini call
   with the candidate PNG inline once — no per-question fan-out and no
@@ -262,7 +268,7 @@ loop is orchestrated by the agent.
 
 ```bash
 # $PYTHON = the absolute interpreter path from your dispatch header.
-OPENAI_API_KEY=... "$PYTHON" \
+"$PYTHON" \
     "$TOOLKIT_DIR/scripts/verify.py" \
     --workdir $WORKDIR/ --attempt 1
 ```
@@ -271,6 +277,9 @@ OPENAI_API_KEY=... "$PYTHON" \
 `--unit-test-vlm openai-single` — so `OPENAI_API_KEY` is the key
 needed by default. Use `GEMINI_API_KEY` only when you switch a stage to
 a Gemini backend. Either may instead be read from `.env` in the cwd.
+`codex-app-server` (the default for `--agent codex-app-server` runs) needs
+no key: the orchestrator's Codex broker serves both stages. Any key a
+backend needs is already in your environment.
 The defaults themselves are overridable without touching this command:
 `$AUDIT_VLM` sets Stage A and `$UNIT_TEST_VLM` sets Stage B — the
 orchestrator's `--audit-vlm` / `--unit-test-vlm` flags export exactly
