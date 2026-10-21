@@ -22,10 +22,12 @@ import {
   headlessStdoutLogPath,
 } from "./headless-log.js";
 import { logInfo, logWarn, writeExternal } from "./log.js";
+import { CODEX_APP_SERVER_AGENT } from "./codex-app-server.js";
+import { invokeCodexAppServer } from "./codex-app-server-agent.js";
 import { registerAgentPgid, deregisterAgentPgid } from "./registry.js";
 
 export interface AgentConfig {
-  agent: string; // claude | codex | cursor | gemini | opencode | pi
+  agent: string; // claude | codex | codex-app-server | cursor | gemini | opencode | pi
   model?: string; // Headless or the native backend supplies the default
   effort?: string; // low | medium | high | xhigh
   timeoutSecs: number;
@@ -155,6 +157,9 @@ export async function agentInvoke(
 ): Promise<number> {
   if (!fs.existsSync(promptFile)) {
     throw new Error(`agent_invoke: prompt file not found: ${promptFile}`);
+  }
+  if (config.agent === CODEX_APP_SERVER_AGENT) {
+    return invokeCodexAppServer(logPath, promptFile, workdir, config, env);
   }
   const nativeAgent = ["cursor", "opencode", "gemini", "pi"].includes(config.agent);
   if (nativeAgent && config.tmux) {

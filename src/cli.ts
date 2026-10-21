@@ -94,19 +94,24 @@ Vision-audit options:
                             $UNIT_TEST_VLM for the verify sub-agent.
 
 Agent options:
-      --agent <name>        claude | codex | cursor | gemini | opencode | pi
+      --agent <name>        claude | codex | codex-app-server | cursor | gemini
+                            | opencode | pi
                             (default: from --mode; all presets use claude).
       --model <id>          Model override (default: claude-opus-5-5 for the
                             claude agent, gemini-3.1-pro-preview for gemini;
-                            headless per-agent default otherwise).
+                            Codex config for codex-app-server; headless
+                            per-agent default otherwise).
       --effort <level>      low | medium | high | xhigh
                             (default: from --mode; light uses low, medium and
                             full use high). Not
-                            supported with --agent gemini.
+                            supported with --agent gemini. An explicit
+                            codex-app-server agent keeps Codex effort defaults
+                            unless --effort is supplied.
       --tmux                Run each sub-agent inside a tmux session (forwards
                             --tmux --wait --delete to headless; headless blocks
                             until the agent finishes, then deletes the session).
-                            Not supported with --agent cursor, opencode, gemini, or pi.
+                            Not supported with --agent codex-app-server, cursor,
+                            opencode, gemini, or pi.
                             headless forbids --json/--usage with --tmux, so
                             this mode omits agent usage; those rows show no
                             tokens in the run summary.
@@ -195,6 +200,13 @@ Environment:
                             gpt-6-astra). Set by --audit-vlm.
   UNIT_TEST_VLM             Stage B unit-test backend for Phase 6 verify
                             (default openai-single). Set by --unit-test-vlm.
+  AUTOILLUSTRATE_CODEX_BIN  Codex executable path or PATH name for
+                            --agent codex-app-server (default: codex).
+                            Uses local app-server stdio, not Headless.
+  AUTOILLUSTRATE_CODEX_RPC_TIMEOUT  App-server startup RPC deadline seconds
+                            (default: 30; separate from the inference watchdog).
+  AUTOILLUSTRATE_CODEX_NETWORK_ACCESS  App-server tool network access: 0 | 1
+                            (default: 1). Does not isolate the host process.
   AGENT_INVOKE_TIMEOUT      Per-sub-agent watchdog seconds (default: 7200).
   AUTOILLUSTRATE_CMD_TIMEOUT  Per-step watchdog seconds for deterministic
                             children like python/drawio (default: 600).
@@ -211,6 +223,8 @@ Every run prints a per-phase + total runtime/token summary and writes
 <workdir>/metrics/run_metrics.json. Token counts are response length only
 (output tokens), not prompt input or cache reads. Image renders, subscription
 agents (codex) and --tmux runs report no tokens and are flagged with +?.
+codex-app-server reports tokens when available; dollar pricing is unknown.
+See docs/codex-app-server.md for setup and the separate image/audit backends.
 
 Outputs land in <workdir>/figures/: full_figure.drawio, full_figure.png,
 full_figure_enhanced.png. Per-phase logs in <workdir>/logs/.
@@ -218,7 +232,7 @@ full_figure_enhanced.png. Per-phase logs in <workdir>/logs/.
 
 // Keep in sync with the usage text and docs/cli.md. --agent reaches a PATH lookup
 // (doctor) and the headless argv, so it must not pass through unvalidated.
-const KNOWN_AGENTS = ["claude", "codex", "cursor", "gemini", "opencode", "pi"];
+const KNOWN_AGENTS = ["claude", "codex", "codex-app-server", "cursor", "gemini", "opencode", "pi"];
 
 // Agent-specific model overrides applied when the user passes no --model.
 // Other agents keep headless's own defaults.
@@ -397,7 +411,7 @@ export function parseCli(argv: string[]): ParsedCli {
   const { panelInspects, enhancementAttempts } = resolved;
   if (
     values.tmux
-    && ["cursor", "opencode", "gemini", "pi"].includes(resolved.agent)
+    && ["codex-app-server", "cursor", "opencode", "gemini", "pi"].includes(resolved.agent)
   ) {
     throw new UsageError(`--tmux is not supported with --agent ${resolved.agent}`);
   }

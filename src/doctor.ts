@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { HEADLESS_VERSION, resolveHeadless } from "./agent.js";
+import { CODEX_APP_SERVER_AGENT, codexAppServerBinary, codexAppServerSettings, findCodexAppServer } from "./codex-app-server.js";
 import { logCheck, logErr, logReportEnd, logReportStart } from "./log.js";
 import { requirementsPath, scriptsDir } from "./paths.js";
 import { findPython3, venvDir, venvPython } from "./venv.js";
@@ -277,7 +278,24 @@ const AGENT_CLI_BINARIES: Record<string, string> = {
   cursor: "cursor-agent",
 };
 
+// A PATH hit is insufficient: old/wrong executables may not implement this
+// transport. This offline probe is not an authentication or model-access test.
+export function checkCodexAppServerCli(env: NodeJS.ProcessEnv = process.env, timeoutMs = 5000): CheckResult {
+  const name = `agent (${CODEX_APP_SERVER_AGENT})`;
+  if (process.platform === "win32") return { name, ok: false, detail: "native Windows is unsupported", hint: "use WSL" };
+  try { codexAppServerSettings(env); }
+  catch (err) { return { name, ok: false, detail: err instanceof Error ? err.message : String(err), hint: "fix the AUTOILLUSTRATE_CODEX_* settings" }; }
+  const found = findCodexAppServer(env);
+  if (!found) return { name, ok: false, detail: `not executable: ${codexAppServerBinary(env)}`, hint: "install Codex or set AUTOILLUSTRATE_CODEX_BIN to the executable (not shell arguments)" };
+  const probe = spawnSync(found, ["app-server", "--help"], { env, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 64 * 1024 });
+  const output = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`;
+  const ok = !probe.error && probe.status === 0 && /\bapp-server\b/.test(output);
+  return { name, ok, detail: ok ? `${found} (app-server supported)` : `${found}: app-server --help failed, timed out, or was not recognized`,
+    hint: ok ? undefined : "upgrade Codex or fix AUTOILLUSTRATE_CODEX_BIN; verify the selected executable supports app-server" };
+}
+
 export function checkAgentCli(agent: string, env: NodeJS.ProcessEnv = process.env): CheckResult {
+  if (agent === CODEX_APP_SERVER_AGENT) return checkCodexAppServerCli(env);
   const binary = AGENT_CLI_BINARIES[agent] ?? agent;
   const found = which(binary, env);
   return {
@@ -453,7 +471,7 @@ export function allChecks(agent: string, env: NodeJS.ProcessEnv = process.env): 
     checkPython(env),
     checkVenv(env),
     checkDrawioExport(env),
-    checkHeadless(env),
+    ...(agent === CODEX_APP_SERVER_AGENT ? [] : [checkHeadless(env)]),
     checkAgentCli(agent, env),
     checkOpenaiKey(env),
   ];
@@ -478,7 +496,7 @@ export function runDoctor(agent: string, env: NodeJS.ProcessEnv = process.env): 
 const CREDENTIAL_USAGE: Record<string, string> = {
   OPENAI_API_KEY: "Phases 3/6 gpt-6-astra audit/unit-test + Phase 5 gpt-image-2.5-sunburst",
   GEMINI_API_KEY: "Phase 5 nanobanana* + Phases 3/6 gemini-3.1-pro audit/unit-test",
-  "codex CLI": "Phase 5 codex + Phase 6 codex unit-test (OAuth)",
+  "codex CLI": "Phase 5 codex + Phase 6 codex unit-test; default codex-app-server executable",
   "Claude Code": "Phases 1/2/3/6 agent (default --agent claude)",
 };
 

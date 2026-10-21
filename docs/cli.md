@@ -73,11 +73,12 @@ autoillustrate export <in.drawio> <out.png> [--export-width <px> | --export-scal
                           --audit-vlm. '*-single' answers all questions in one
                           call (cheapest); the others fan out one call per
                           question. Sets $UNIT_TEST_VLM for the verify sub-agent.
-    --agent <name>        claude | codex | cursor | gemini | opencode | pi
+    --agent <name>        claude | codex | codex-app-server | cursor | gemini
+                          | opencode | pi
                           (default: from --mode; all presets use claude).
     --model <id>          Model override (default: claude-opus-5-5 for the claude
-                          agent, gemini-3.1-pro-preview for gemini; headless
-                          per-agent default otherwise).
+                          agent, gemini-3.1-pro-preview for gemini; Codex config
+                          for codex-app-server, backend default otherwise).
     --effort <level>      low | medium | high | xhigh
                           (default: from --mode; light uses low, medium and full
                           use high). Not supported
@@ -85,10 +86,16 @@ autoillustrate export <in.drawio> <out.png> [--export-width <px> | --export-scal
     --tmux                Run each sub-agent inside a tmux session (forwards
                           --tmux --wait --delete to headless; headless blocks
                           until the agent finishes, then deletes the session).
-                          Not supported with --agent cursor, opencode, gemini, or pi.
+                          Not supported with --agent codex-app-server, cursor,
+                          opencode, gemini, or pi.
                           headless forbids --json/--usage with --tmux, so this
                           mode omits agent usage; those rows show no tokens.
 ```
+`--agent codex-app-server` uses a local Codex app-server over stdio, without
+Headless. See [Codex app-server](codex-app-server.md) for authentication,
+model defaults, security boundaries, and the separate image/audit backends.
+An explicit `codex-app-server` agent keeps Codex’s configured reasoning effort
+unless `--effort` is supplied, rather than inheriting the Claude preset effort.
 
 ## Correction loops and phase control
 
@@ -152,10 +159,17 @@ export                    Hardened drawio → PNG export; see "Export
                           reliability" below.
 ```
 
+Headless is not checked for `doctor --agent codex-app-server`. The doctor
+probe verifies the selected executable supports `app-server --help` (bounded to five seconds).
+It does not verify authentication or model access. The report is an inventory; its API-key checks also cover separate image/audit backends.
+
 ## Environment variables
 
 | Variable | Effect |
 |----------|--------|
+| `AUTOILLUSTRATE_CODEX_BIN` | Codex executable path or PATH name for `--agent codex-app-server` only (default `codex`). Not a shell command. |
+| `AUTOILLUSTRATE_CODEX_RPC_TIMEOUT` | Per-startup-request deadline in seconds for `codex-app-server` (default 30); notification traffic does not reset it. |
+| `AUTOILLUSTRATE_CODEX_NETWORK_ACCESS` | `0` disables network in the app-server turn sandbox; `1` enables it (default). Not host-process/network isolation. |
 | `AGENT_INVOKE_TIMEOUT` | Per-sub-agent watchdog in seconds (default 7200). |
 | `AUTOILLUSTRATE_CMD_TIMEOUT` | Watchdog in seconds for deterministic python/drawio steps (default 600). A wedged drawio export fails the phase instead of hanging forever. |
 | `AUTOILLUSTRATE_CHROME` | Chrome/Chromium binary for the export fallback (auto-detected by default). |

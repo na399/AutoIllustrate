@@ -292,9 +292,12 @@ const LOG_PHASE: Array<{ test: (file: string) => boolean; phase: number }> = [
   { test: (file) => file === "phase6.log", phase: 6 },
 ];
 
+// Keep the collector shared, but identify the native transport accurately.
+const agentCostSource = (agent: string): string =>
+  agent === "codex-app-server" ? "native:codex-app-server" : `headless:${agent}`;
 function priceHeadlessSlice(agent: string, model: HeadlessModelCost, prices: PriceTable): CostEntry {
   const base: CostEntry = {
-    source: `headless:${agent}`,
+    source: agentCostSource(agent),
     model: model.model,
     estimated: true,
     basis: "tokens",
@@ -349,7 +352,7 @@ export function collectHeadlessCostsByPhase(
     for (const model of slices) {
       if (model.costUsd !== undefined) {
         phaseCosts.push({
-          source: `headless:${agent}`,
+          source: agentCostSource(agent),
           model: model.model,
           costUsd: model.costUsd,
           estimated: model.estimated ?? false,
@@ -362,7 +365,7 @@ export function collectHeadlessCostsByPhase(
         });
       } else if (model.normalized) {
         phaseCosts.push({
-          source: `headless:${agent}`,
+          source: agentCostSource(agent),
           model: model.model,
           estimated: model.estimated ?? true,
           basis: model.basis ?? "tokens",
