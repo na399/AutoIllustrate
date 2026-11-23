@@ -71,7 +71,7 @@ installed correctly.
   `gpt-image-2.5-sunburst` unless a different `--enhance-model` is selected.
   Not needed with a logged-in Codex CLI: `--agent codex-app-server` runs
   everything on your ChatGPT subscription (see
-  [Run without API keys](#5-run-without-api-keys-chatgpt-subscription)),
+  [Run without API keys](#6-run-without-api-keys-chatgpt-subscription)),
   and with any agent the vision audits switch to Codex automatically when
   no key is set.
 - **`GEMINI_API_KEY`** — only if you select a Gemini backend:
@@ -196,13 +196,38 @@ PROMPT
 )"
 ```
 
-### 3. Resume an earlier run from the compose step (Phase 4)
+Colours you pin this way become a closed palette: Phase 2 rejects any panel
+that uses a colour outside it (white is always allowed).
+
+### 3. Reproduce a layout you sketched
+
+Draw the arrangement in the prompt, as ASCII or as explicit rows, columns
+and edge routes. Phase 1 records it as a binding layout, and Phase 2 rejects
+any panel that departs from it: node order, containers, the exact set of
+edges and the sides they attach to, any edge crossing (whatever the edge
+colours), edges running through boxes, and labels that do not fit their box.
+A tall layout can make the figure portrait.
+
+```bash
+autoillustrate examples/ai_scientist_method.tex --prompt "$(cat <<'PROMPT'
+One panel. Reproduce this layout exactly:
+
+  [Idea generation] --> [Experimentation] --> [Manuscript generation] --> [AI Reviewer]
+          ^
+  [Literature search]
+
+Style: ink + one accent, #0F5E5E for the AI Reviewer box only.
+PROMPT
+)"
+```
+
+### 4. Resume an earlier run from the compose step (Phase 4)
 
 ```bash
 autoillustrate --workdir runs/2026-05-20-101010 --resume-from compose
 ```
 
-### 4. Generate a figure from a project directory
+### 5. Generate a figure from a project directory
 
 The source can be a directory. Phase 1 walks it and reads every relevant
 `.tex` / `.md` / `.py` / `.txt` file. Use the prompt to scope it to one
@@ -213,7 +238,7 @@ autoillustrate ./sources_bundle/ \
     --prompt "Please make a diagram illustrating the code architecture."
 ```
 
-### 5. Run without API keys (ChatGPT subscription)
+### 6. Run without API keys (ChatGPT subscription)
 
 With the [Codex CLI](https://developers.openai.com/codex/) installed and
 logged in (`codex login`), `--agent codex-app-server` drives the sub-agents
@@ -264,8 +289,9 @@ See [docs/pipeline.md](docs/pipeline.md) for the details.
   variables, export reliability.
 - [Running and resuming](docs/running.md) — what the terminal output looks
   like, exit codes, interactive editing, resuming runs.
-- [How it works](docs/pipeline.md) — the six phases, the `--mode` presets,
-  what is editable, and the run directory layout.
+- [How it works](docs/pipeline.md) — the six phases, binding layouts and
+  palettes, the `--mode` presets, what is editable, and the run directory
+  layout.
 - [Codex app-server](docs/codex-app-server.md) — running on a ChatGPT
   subscription without API keys: the `codex-app-server` agent, the keyless
   audit/restyle backends and the Codex broker.
