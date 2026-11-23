@@ -41,9 +41,9 @@ edge colors"):
       via `<mxGeometry><Array as="points">…</Array></mxGeometry>`.
   (g) Edge mxCells (cells with `edge="1"`) must NOT carry a hardcoded
       `strokeColor=#…` hex literal — the value must be a Python
-      `{placeholder}` filled from `Path.color`. The crossing check
-      ("paths of different colors may cross") needs Python to be the
-      single source of truth for stroke color.
+      `{placeholder}` filled from `Path.color`. Python must be the
+      single source of truth for stroke color so the rendered color is
+      the one the geometry checks (palette, crossings) saw.
   (h) An edge mxCell whose `<mxGeometry>` contains a
       `<Array as="points">` waypoint list (i.e. a routed edge) must
       NOT use `source="…"` / `target="…"` attributes or the
@@ -70,10 +70,21 @@ Usage:
 
 Exits non-zero on the first violation, printing the offending file +
 mxCell id + value.
+  (i) Label text must not contain backslash escapes such as `\\n` or
+      `\\t` outside math: XML attributes have no escape sequences, so
+      draw.io renders them verbatim. Use `&lt;br&gt;` (with html=1) or
+      `&#xa;` for a line break. LaTeX inside math spans is exempt.
+  (j) When the template's directory holds a `figure.json` with a
+      `palette` (the user's restricted colors, recorded by Phase 1),
+      every hex color in a cell style (fill / stroke / font / label
+      background / gradient) must come from it. White and `none` are
+      always allowed, and `[[ pl … ]]` / `[[ mp … ]]` placeholder boxes
+      keep their mandated grey style.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -155,6 +166,14 @@ MXPOINT_X_PLACEHOLDER_RE = re.compile(r'\bx\s*=\s*"\{([^{}"]+)\}"')
 MXPOINT_Y_PLACEHOLDER_RE = re.compile(r'\by\s*=\s*"\{([^{}"]+)\}"')
 COMPOSER_X_KEY_RE = re.compile(r"_x\d*$")
 COMPOSER_Y_KEY_RE = re.compile(r"_y\d*$")
+# Rule (j): hex color literals on the style keys that paint a cell.
+STYLE_HEX_RE = re.compile(
+    r"(?:^|;)\s*(fillColor|strokeColor|fontColor|labelBackgroundColor|"
+    r"labelBorderColor|gradientColor|swimlaneFillColor)\s*=\s*"
+    r"(#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{3})\s*(?=;|$)"
+)
+DEFERRED_PLACEHOLDER_RE = re.compile(r"\[\[\s*(?:pl|mp)\s")
+ALWAYS_ALLOWED_COLORS = {"#FFFFFF"}
 
 
 def is_math_only(value: str) -> bool:
@@ -235,6 +254,52 @@ def brace_protected_operators(value: str) -> list[str]:
     return errs
 
 
+LITERAL_ESCAPE_RE = re.compile(r"\\[ntr]")
+
+
+def _norm_hex(color: str) -> str:
+    c = color.upper()
+    return "#" + "".join(ch * 2 for ch in c[1:]) if len(c) == 4 else c
+
+
+def load_palette(template: Path) -> set[str] | None:
+    """The closed palette from the `figure.json` beside the template, or
+    None when there is none (rule (j) is then off)."""
+    fig = template.parent / "figure.json"
+    if not fig.exists():
+        return None
+    try:
+        palette = json.loads(fig.read_text()).get("palette")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return {_norm_hex(c) for c in palette} | ALWAYS_ALLOWED_COLORS if palette else None
+
+
+def off_palette_colors(style: str, value: str, palette: set[str] | None) -> list[str]:
+    """Rule (j): hex colors in `style` that are not in the figure palette."""
+    if palette is None or DEFERRED_PLACEHOLDER_RE.search(value):
+        return []
+    return [
+        f"`{m.group(1)}={m.group(2)}` is not in the figure palette "
+        f"({', '.join(sorted(palette))}); use a palette color"
+        for m in STYLE_HEX_RE.finditer(style)
+        if _norm_hex(m.group(2)) not in palette
+    ]
+
+
+def literal_escapes(value: str) -> list[str]:
+    """Flag backslash escapes such as a JSON/Python-style `\\n` typed into
+    a label (rule (i)). XML attributes have no escape sequences, so draw.io
+    renders them literally ("Training records\\nand labels"). LaTeX inside
+    math spans (\\nabla, \\neq, \\nu) is exempt."""
+    outside = DISPLAY_MATH_RE.sub("", INLINE_MATH_RE.sub("", value))
+    return [
+        f"literal escape {m.group(0)!r} in label text renders verbatim; use "
+        f"`&lt;br&gt;` (html=1) or `&#xa;` for a line break"
+        for m in LITERAL_ESCAPE_RE.finditer(outside)
+    ]
+
+
 def auto_routed_edge_style(style: str) -> list[str]:
     """Flag any `edgeStyle=<value>` token where `<value>` is not
     `none` (rule (f)). Auto-routers diverge from the Python-checked
@@ -258,9 +323,9 @@ def auto_routed_edge_style(style: str) -> list[str]:
 
 def hardcoded_edge_stroke_color(style: str, is_edge: bool) -> list[str]:
     """For edge mxCells (`edge=\"1\"`), flag `strokeColor=<value>` where
-    `<value>` is not a Python `{placeholder}` (rule (g)). The crossing
-    check needs Python to own the stroke color so 'different colors are
-    allowed to cross' is enforceable."""
+    `<value>` is not a Python `{placeholder}` (rule (g)). Python owns the
+    stroke color so the palette check in `panel_geometry` sees the color
+    that is actually drawn."""
     if not is_edge:
         return []
     errs: list[str] = []
@@ -271,8 +336,7 @@ def hardcoded_edge_stroke_color(style: str, is_edge: bool) -> list[str]:
         errs.append(
             f"edge mxCell has hardcoded `strokeColor={val}`; edge stroke "
             f"colors must be a Python `{{placeholder}}` filled from "
-            f"`Path.color` so `check_path_crossings` can enforce the "
-            f"'different-colored paths may cross' rule."
+            f"`Path.color` so the geometry checks see the drawn color."
         )
     return errs
 
@@ -367,6 +431,7 @@ def waypointed_edge_endpoints(open_tag: str, body: str) -> list[str]:
 
 def lint_file(path: Path) -> list[str]:
     text = path.read_text()
+    palette = load_palette(path)
     errs: list[str] = []
     # Rule (h): waypointed edges must own their endpoints via
     # sourcePoint/targetPoint mxPoints, not source=/target=/exit*/entry*.
@@ -391,9 +456,15 @@ def lint_file(path: Path) -> list[str]:
         for e in hardcoded_edge_stroke_color(style, is_edge):
             errs.append(f"{path}: cell id={cid!r}: {e}")
         value_m = VALUE_ATTR_RE.search(tag)
+        # Rule (j): cell colors must come from the figure palette, if any.
+        for e in off_palette_colors(style, value_m.group(1) if value_m else "", palette):
+            errs.append(f"{path}: cell id={cid!r}: {e}")
         if not value_m:
             continue
         value = value_m.group(1)
+        # Rule (i): no literal backslash escapes outside math.
+        for e in literal_escapes(value):
+            errs.append(f"{path}: cell id={cid!r}: {e}")
         if "$" not in value and "\\(" not in value:
             continue
         # Rule (a): math-only label must use $$...$$ not \(...\).
@@ -438,7 +509,8 @@ def main() -> int:
             f"MathJax line breaks\" (rules a-e) and "
             f"references/panel_agent.md (rules f-h: no "
             f"orthogonalEdgeStyle, Python-owned edge colors, "
-            f"Python-owned waypointed-edge endpoints).",
+            f"Python-owned waypointed-edge endpoints) and rule (i): no "
+            f"literal \\n-style escapes in labels (use &lt;br&gt; or &#xa;).",
             file=sys.stderr,
         )
         return 1
