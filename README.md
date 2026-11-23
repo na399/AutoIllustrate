@@ -38,10 +38,40 @@ AutoIllustrate was used to generate the diagrams of
 <a href="https://www.nature.com/articles/s41586-026-10265-5">The AI Scientist</a>
 paper (see the <a href="#quickstart">Quickstart</a>).</i></p>
 
+## What this fork adds
+
+This fork of [SakanaAI/AutoIllustrate](https://github.com/SakanaAI/AutoIllustrate)
+adds:
+
+- **ChatGPT-subscription runs with no API keys.** `--agent codex-app-server`
+  drives the sub-agents through a local `codex app-server` instead of the
+  Headless CLI, and runs the vision audits, unit tests and restyle on Codex
+  too ([example 6](#6-run-without-api-keys-chatgpt-subscription)).
+- **A Codex broker.** Each codex-app-server run starts a loopback broker
+  that owns the Codex connection. Sandboxed sub-agents send it audit, image
+  and draw.io export requests with a per-run token, so they never hold
+  Codex credentials. `autoillustrate broker --workdir <dir>`
+  starts one by hand.
+- **Keyless audits under any agent.** When `OPENAI_API_KEY` is unset and the
+  Codex CLI is logged in, the Phase 3 / Phase 6 audits use Codex instead of
+  failing preflight.
+- **Binding layouts and palettes.** A layout sketched in the prompt and the
+  colours it pins are enforced, not just suggested
+  ([example 3](#3-reproduce-a-layout-you-sketched)).
+- **Stricter panel checks.** Edge crossings fail whatever their colours,
+  edges may not run through boxes, every label must fit its box, and the
+  exported template must draw exactly the geometry that was checked.
+
 ## Install
 
+The `autoillustrate` package on npm is the upstream release, without these
+changes. Install this fork from a checkout:
+
 ```bash
-npm install -g autoillustrate    # or: npx autoillustrate ...
+git clone https://github.com/na399/AutoIllustrate.git
+cd AutoIllustrate
+pnpm install && pnpm build
+pnpm link --global    # puts `autoillustrate` on PATH
 ```
 
 Run `autoillustrate doctor` to check that the prerequisites below are
@@ -63,9 +93,11 @@ installed correctly.
 - **Python ≥ 3.10** — no manual setup is needed: on first run the CLI makes
   its own cached venv under `~/.cache/autoillustrate/`. Set
   `VENV_PY=/path/to/python` to use your own environment instead.
-- **Headless CLI** (`@roberttlange/headless`) — all agent calls go through
-  it. It is installed with AutoIllustrate. The default agent is Claude Code,
-  so `claude` must also be on `PATH` unless you select a different `--agent`.
+- **Headless CLI** (`@roberttlange/headless`) — agent calls go through it,
+  except with `--agent codex-app-server`, which talks to `codex app-server`
+  directly. It is installed with AutoIllustrate. The default agent is Claude
+  Code, so `claude` must also be on `PATH` unless you select a different
+  `--agent`.
 - **`OPENAI_API_KEY`** — used by default: the Phase 3 / Phase 6 vision
   audits use `gpt-6-astra`, and the Phase 5 restyle uses
   `gpt-image-2.5-sunburst` unless a different `--enhance-model` is selected.
@@ -253,7 +285,10 @@ autoillustrate examples/ai_scientist_method.tex \
     --agent codex-app-server --mode full
 ```
 
-The audit scripts also work this way when run by hand, outside a pipeline run:
+The audit scripts also work this way when run by hand, outside a pipeline
+run. They start a private broker for themselves; to share one across
+several calls, keep `autoillustrate broker --workdir runs/<run>` running in
+another terminal (it serves until its stdin closes):
 
 ```bash
 python scripts/inspect_panel.py --workdir runs/<run> --panel-id <panel> \
