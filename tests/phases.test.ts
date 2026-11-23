@@ -156,6 +156,20 @@ test("phase2 dispatches per panel and validates reports + PNGs", async () => {
   assert.ok(fs.existsSync(path.join(ctx.workdir, ".phase2_prompt_b.md")));
 });
 
+test("phase2 stages the shared panel libraries (geometry + layout + text fit) into the workdir", async () => {
+  const ctx = makeCtx();
+  writeFigureJson(ctx.workdir, ["a"]);
+  installAgentStub(ctx, OK_PANEL_STUB);
+  await runPanelPhase(ctx, PHASE2_SPEC);
+  for (const lib of ["panel_geometry.py", "panel_layout.py", "panel_text.py"]) {
+    assert.equal(
+      fs.readFileSync(path.join(ctx.workdir, lib), "utf8"),
+      fs.readFileSync(path.join(ctx.toolkitDir, "assets", lib), "utf8"),
+      `${lib} must be staged verbatim`,
+    );
+  }
+});
+
 test("phase2 tolerates non-zero agent exit when report is ok (watchdog case)", async () => {
   const ctx = makeCtx({ sequential: true });
   writeFigureJson(ctx.workdir, ["a"]);
@@ -353,7 +367,7 @@ test("phase4 runs the compose chain and dimension check", async () => {
   await runPhase4(ctx);
   const log = fs.readFileSync(path.join(ctx.workdir, "logs", "phase4.log"), "utf8");
   assert.match(log, /\[step 1\/4\] composing template/);
-  assert.match(log, /exported 2560x1440px \(target 1440±10% \[1296\.\.1584\]\)/);
+  assert.match(log, /exported 2560x1440px \(target 1440±10% \[1296\.\.1584\]; canvas 2000x1104\)/);
   assert.match(log, /✓ OK \(2560x1440, placement=half-width\)/);
 });
 
@@ -363,7 +377,21 @@ test("phase4 warns (not aborts) on out-of-band dimensions", async () => {
   await runPhase4(ctx);
   const log = fs.readFileSync(path.join(ctx.workdir, "logs", "phase4.log"), "utf8");
   assert.match(log, /⚠ expected width 2560, got 2559/);
-  assert.match(log, /⚠ height 900 outside placement target/);
+  assert.match(log, /⚠ height 900 outside target 1440±10%/);
+});
+
+test("phase4 checks the height against figure.json's layout-driven canvas", async () => {
+  const ctx = makeCtx({ placement: "full-width" });
+  fs.writeFileSync(
+    path.join(ctx.workdir, "figure.json"),
+    JSON.stringify({ placement: "full-width", canvas_w: 2000, canvas_h: 2688, panels: [{ id: "a" }] }),
+  );
+  installPhase4Stubs(ctx, { dims: "2560 3400" });
+  const result = await runPhase4(ctx);
+  const log = fs.readFileSync(path.join(ctx.workdir, "logs", "phase4.log"), "utf8");
+  assert.match(log, /exported 2560x3400px \(target 3420±10% \[3078\.\.3762\]; canvas 2000x2688\)/);
+  assert.doesNotMatch(log, /outside target/);
+  assert.equal(result?.status, "completed");
 });
 
 test("phase4 warns loudly on unparsable dimensions instead of passing on NaN", async () => {

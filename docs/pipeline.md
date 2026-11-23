@@ -31,6 +31,43 @@ enhancement in Phase 5.
 6. **Verify + repair** — audit the enhanced PNG, re-enhance if it fails, and
    ship the deterministic render as a fallback if no candidate is acceptable.
 
+## Binding layouts and restricted palettes
+
+To get a specific arrangement rather than the agents' own, put it in the
+prompt: an ASCII diagram (or explicit rows/columns, containers and edge
+routes) plus any visual direction such as "ink + one accent, #0F5E5E for
+the final box only". Phase 1 records the layout as the panel's
+`layout_spec` in `figure.json` and the direction as `style_constraints` +
+a closed `palette`. Phase 2 then checks the rendered geometry against them
+(`assets/panel_layout.py` via `panel_geometry.enforce`): grid order,
+containers and their title bands, the exact edge set and attachment sides,
+edge labels, zero crossings for a planar layout, no edge through a node or
+label, and only palette colors (`lint_math.py` rule (j) covers template
+fills, strokes and fonts). Crossings are rejected whatever their colors,
+so agents cannot recolor edges to get past the check. Finally, the filled
+template must draw exactly the geometry that was checked (every edge cell's
+points equal its validated polyline, every cell sits on a registered box),
+so a template that drops a waypoint cannot ship an arrow that stops short.
+Every label must also fit its box (`assets/panel_text.py` estimates the
+wrapped text from Helvetica metrics), so text that spills over a border,
+or a title that wraps inside a one-line title box, fails before export.
+
+A binding layout also sets the page shape. Without one, the composite canvas
+is fixed by placement: 2000 x 832 panel-space units for full-width (21:9) and
+2000 x 1104 for half-width (16:9). Panels split that canvas evenly, so two
+stacked full-width panels get 2000 x 416 each. With a `layout_spec`,
+`schema.py --populate-targets` estimates each grid's natural size: every
+row / column fits its labelled boxes, and empty tracks become narrow
+routing channels. The canvas keeps its 2000 width, but its height follows
+those aspects. Stacked panels get height 2000 / aspect each, and panels in a
+row share one height. The result is recorded as `canvas_w` / `canvas_h` in
+`figure.json`. The canvas aspect is clamped to 0.7–3.0, so a figure is never
+taller than a page, and panels without a layout keep their default share.
+The export stays 2560 px wide, so such a figure can be portrait. The panel
+agents' `PAGE_W` / `PAGE_H`, Phase 3's ±15% size check and Phase 4's
+export-height check all read that canvas. Compose lays panels out from their
+actual pages, so it needs no change.
+
 ## Modes and correction loops
 
 Phases 3 and 6 are audit-and-repair loops whose budgets are set by `--mode`:

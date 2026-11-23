@@ -45,15 +45,21 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from schema import FigureDoc, validate  # noqa: E402
 
 
-def stage_panel_geometry(workdir: Path) -> None:
-    """Ensure the shared geometry-validation library is in the workdir next to
-    the panel generators. Each generate_<panel>.py (imported by
-    generate_composite.py at compose time) imports `panel_geometry`; the panel
-    phase normally stages it, but copy it here too so a compose-only run on an
-    existing workdir is self-sufficient. Overwrites to mirror the toolkit."""
-    src = SCRIPT_DIR.parent / "assets" / "panel_geometry.py"
-    if src.exists():
-        shutil.copyfile(src, workdir / "panel_geometry.py")
+# Shared libraries every generate_<panel>.py imports from its own workdir.
+PANEL_LIBRARIES = ("panel_geometry.py", "panel_layout.py", "panel_text.py")
+
+
+def stage_panel_libraries(workdir: Path) -> None:
+    """Ensure the shared panel libraries (geometry checks, binding-layout
+    loader, text-fit check) are in the workdir next to the panel generators. Each
+    generate_<panel>.py (imported by generate_composite.py at compose time)
+    imports them; the panel phase normally stages them, but copy them here
+    too so a compose-only run on an existing workdir is self-sufficient.
+    Overwrites to mirror the toolkit."""
+    for name in PANEL_LIBRARIES:
+        src = SCRIPT_DIR.parent / "assets" / name
+        if src.exists():
+            shutil.copyfile(src, workdir / name)
 
 # Single-brace `{name}` placeholders, ignoring doubled `{{` / `}}` used by
 # str.format escaping (common in LaTeX labels).
@@ -385,7 +391,7 @@ def _cli() -> int:
 
     out_dir = args.out_dir or Path("figures")
 
-    stage_panel_geometry(args.workdir)
+    stage_panel_libraries(args.workdir)
 
     composite_template = build_composite_template(panel_ids, args.workdir)
     (args.workdir / "composite.drawio.template").write_text(composite_template)

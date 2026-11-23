@@ -74,6 +74,21 @@ test("describePanelShare reports position, area share, and target size", () => {
   assert.match(describePanelShare({ panels: [{ id: "g", proportion_w: 0.5, proportion_h: 0.5 }, {}, {}, {}] }, "g", "full-width"), /^panel 1 of 4, 25% /);
 });
 
+test("describePanelShare quotes the size against figure.json's canvas when it records one", () => {
+  const figure = {
+    canvas_w: 2000,
+    canvas_h: 2688,
+    panels: [
+      { id: "a", proportion_w: 1, proportion_h: 0.5167 },
+      { id: "b", proportion_w: 1, proportion_h: 0.4833 },
+    ],
+  };
+  assert.equal(
+    describePanelShare(figure, "a", "full-width"),
+    "panel 1 of 2, 52% of the figure area (about 2000 × 1389 panel-space units)",
+  );
+});
+
 test("describePanelShare degrades when proportions or the file are missing", () => {
   assert.equal(
     describePanelShare({ panels: [{ id: "a" }, { id: "b" }, { id: "c" }] }, "b", "half-width"),

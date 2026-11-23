@@ -29,6 +29,17 @@ Read all of:
 - `$WORKDIR/theme.txt` — the figure's intent and arrangement.
 - `{{TOOLKIT_DIR}}/references/style_guide.md` — the style options.
 
+**Binding style constraints.** If `figure.json` has a top-level
+`style_constraints` (the user's visual direction, verbatim) and/or
+`palette` (a closed hex set), they override Step 2 and the style guide's
+defaults: do not design a palette — map the user's colors onto roles,
+use every hex exactly as given (no "polished" shade shifts), and use no
+color outside `palette` anywhere in `style.md` (white is always allowed).
+Explicit stroke widths, font family and sizes in `style_constraints` also
+replace the toolkit defaults (e.g. `strokeWidth=3`). Phase 2 enforces the
+palette mechanically (template lint + edge-color check), so an off-palette
+hex in `style.md` makes every panel fail.
+
 ## Step 2 — Design the palette
 
 **Design ONE bespoke palette** for the entire figure using the method in
@@ -79,19 +90,11 @@ A concrete, figure-wide spec the panel agents apply verbatim. Include:
    white on a saturated fill; never light-on-light).
 3. **Edges** — the palette's edge color, `strokeWidth=3`, solid = forward data
    flow, dashed = auxiliary (`dashed=1;dashPattern=4 2`). Reaffirm this
-   solid/dashed split is semantic. **Always provide 2–3 secondary edge
-   colors** (hex, visibly distinct from the primary and from each other,
-   in priority order) for arrows that must cross: Phase 2's geometry check
-   hard-fails any two SAME-colored edges that intersect, so a spec with a
-   single edge color leaves the panel agent no legal way to draw an
-   unavoidable crossing. These secondaries are a **role-free pool**, not
-   new color roles: do not attach a meaning to each one (no "color X =
-   this edge type"). A panel takes the next pool color for
-   whichever edge needs it, and the two members of a crossing pair may
-   take two different pool colors even when they play the same role —
-   edge meaning is carried by solid/dashed and by the label, not by hue.
-   Say this explicitly in the spec so panels do not re-bind the pool to
-   roles. Do not write ready-to-paste edge style strings
+   solid/dashed split is semantic. Do **not** add a pool of secondary
+   edge colors for crossings: Phase 2's geometry check rejects every
+   crossing whatever its colors, so panels resolve crossings by routing.
+   A second edge color is allowed only when it carries a named meaning
+   (e.g. muted grey for optional / auxiliary dashed edges). Do not write ready-to-paste edge style strings
    with a literal `strokeColor=#…` — edge hex values are injected by the
    panel's Python, and a hardcoded hex on an edge fails Phase 2 lint.
 4. **Geometry** — rounded (`rounded=1;arcSize=8`) process nodes, sharp data

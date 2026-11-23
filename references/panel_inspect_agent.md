@@ -155,8 +155,9 @@ equation is absent.
 
 Dimensions (deterministic, no model call):
 - The rendered PNG's pixel dimensions diverge from the size implied
-  by `figure.json`'s `proportion_w` / `proportion_h` by more than
-  ±15% on either axis. See the "Panel size from figure.json
+  by `figure.json`'s `proportion_w` / `proportion_h` of its canvas
+  (`canvas_w` / `canvas_h`, taller than 21:9 / 16:9 when binding
+  layouts set it) by more than ±15% on either axis. See the "Panel size from figure.json
   proportions" section in `references/panel_agent.md`.
 
 ### No direction edits
@@ -169,6 +170,16 @@ repair loop. Fix arrow defects by re-routing the polyline, moving
 endpoints, or relabeling — not by reversing or re-heading the arrow.
 (Incidental arrowhead *marker shape* — open vs filled, etc. — is not
 probed and may be changed freely if it helps a repair.)
+
+### Binding constraints survive repair
+
+Repairs keep every argument the generator passes to `enforce(...)`:
+`LAYOUT` (the panel's binding `layout_spec`), `PALETTE`, the containers,
+and an empty `ALLOWED_CROSSINGS` unless the plan already justified a
+pair. Fix a crossing or an edge through a box by re-routing, never by
+recoloring an edge, declaring the crossing, or dropping the layout; a
+binding layout's rows, columns, containers and edge sides are not
+repair options either.
 
 ## Lifecycle (steps 1–3)
 
@@ -193,7 +204,7 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
    `drawio_prompt` verbatim and lists the intended element inventory),
    `$WORKDIR/methods.md` (the source of truth), and
    `$WORKDIR/figure.json` (for the panel's `proportion_w` /
-   `proportion_h`). It runs THREE vision-model passes plus a
+   `proportion_h` and the figure's `canvas_w` / `canvas_h`). It runs THREE vision-model passes plus a
    deterministic dimensions check against the rendered PNG, and merges their
    issues into `$WORKDIR/panels/<panel_id>.inspect.json` with this
    shape:

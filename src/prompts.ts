@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { figureCanvas } from "./canvas.js";
 import { promptsDir } from "./paths.js";
 
 export interface PromptVars {
@@ -69,14 +70,6 @@ export function buildPhase1bPrompt(vars: PromptVars): string {
   return renderTemplate("phase1b-style.md", vars);
 }
 
-// Mirrors CANONICAL_INNER in scripts/schema.py: the composite's inner
-// panel-space size per placement, so the share note can quote the panel's
-// own target size alongside its fraction of the figure.
-const CANONICAL_INNER: Record<string, [number, number]> = {
-  "full-width": [2000, 832],
-  "half-width": [2000, 1104],
-};
-
 // One-line summary of how much of the figure a panel owns, for the Phase 2
 // dispatch header — the panel agent scales its detail to this. Proportions
 // come from figure.json (back-filled by scripts/schema.py in Phase 1); when
@@ -92,7 +85,9 @@ export function describePanelShare(figure: unknown, panelId: string, placement: 
   const ph = typeof me?.proportion_h === "number" ? me.proportion_h : undefined;
   if (pw === undefined || ph === undefined) return `${count} (share unknown: figure.json carries no proportions)`;
   const pct = Math.round(pw * ph * 100);
-  const inner = CANONICAL_INNER[placement];
+  // The figure's canvas (figure.json canvas_w/h, else the placement's), so
+  // the note quotes the panel's own target size alongside its share.
+  const inner = figureCanvas(figure, placement);
   const dims = inner ? ` (about ${Math.round(pw * inner[0])} × ${Math.round(ph * inner[1])} panel-space units)` : "";
   return `${count}, ${pct}% of the figure area${dims}`;
 }

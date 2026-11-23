@@ -41,22 +41,28 @@ interface PanelPhaseSpec {
 
 const panelPng = (workdir: string, pid: string) => path.join(workdir, "panels", `${pid}.png`);
 
-// Every generate_<panel>.py imports the shared geometry-validation library
-// `panel_geometry.py`. It must live in the workdir next to the generators so
-// the import resolves in all three load contexts (panel agent, compose,
-// check_params_contract). The agent copies only the generator template, so the
-// orchestrator stages the library here — overwriting any stale copy so a
-// workdir carried across toolkit versions always mirrors the current checks.
-// A copy failure is WARN-only, consistent with the rest of the phase: panels
-// that need the library then fail via the authoritative report/deliverable
-// validation rather than aborting the whole phase with a raw fs error.
-function stagePanelGeometry(ctx: RunContext): void {
-  const src = path.join(ctx.toolkitDir, "assets", "panel_geometry.py");
-  const dst = path.join(ctx.workdir, "panel_geometry.py");
-  try {
-    fs.copyFileSync(src, dst);
-  } catch (err) {
-    logWarn("phase2", `could not stage panel_geometry.py into workdir: ${err instanceof Error ? err.message : String(err)}`);
+// Every generate_<panel>.py imports the shared panel libraries: the
+// geometry-validation checks (`panel_geometry.py`) and the binding-layout
+// loader (`panel_layout.py`, which reads the panel's figure.json layout_spec).
+// They must live in the workdir next to the generators so the imports resolve
+// in all three load contexts (panel agent, compose, check_params_contract).
+// The agent copies only the generator template, so the orchestrator stages
+// the libraries here — overwriting any stale copy so a workdir carried across
+// toolkit versions always mirrors the current checks. A copy failure is
+// WARN-only, consistent with the rest of the phase: panels that need a library
+// then fail via the authoritative report/deliverable validation rather than
+// aborting the whole phase with a raw fs error.
+const PANEL_LIBRARIES = ["panel_geometry.py", "panel_layout.py", "panel_text.py"];
+
+function stagePanelLibraries(ctx: RunContext): void {
+  for (const lib of PANEL_LIBRARIES) {
+    const src = path.join(ctx.toolkitDir, "assets", lib);
+    const dst = path.join(ctx.workdir, lib);
+    try {
+      fs.copyFileSync(src, dst);
+    } catch (err) {
+      logWarn("phase2", `could not stage ${lib} into workdir: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 
@@ -205,7 +211,7 @@ export async function runPanelPhase(ctx: RunContext, spec: PanelPhaseSpec): Prom
   if (ids.length === 0) {
     throw new PhaseError("figure.json has no panels", 1);
   }
-  stagePanelGeometry(ctx);
+  stagePanelLibraries(ctx);
   const phaseNo = spec.noun === "panel" ? 2 : 3;
   const verb = spec.noun === "panel" ? "Rendering" : "Inspecting";
   logInfo(spec.name, `${ids.length} panel(s) to ${spec.noun === "panel" ? "render" : "inspect"}: ${ids.join(" ")}`);

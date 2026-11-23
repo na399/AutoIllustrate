@@ -14,9 +14,11 @@ to the generators so it imports cleanly in all three contexts that load a
 generator: the panel agent running it directly, `scripts/compose.py`'s
 `generate_composite.py`, and `scripts/check_params_contract.py`.
 """
+from collections import Counter
 from dataclasses import dataclass
 import math
 import sys
+import xml.etree.ElementTree as ET
 
 # ── Collision detection ──
 COLLISION_MARGIN = 4
@@ -36,6 +38,10 @@ ENDPOINT_SNAP_TOL = 2
 MIN_SEGMENT_LEN = 30
 
 # ── Path-crossing budget ──
+# Crossings are errors by default, whatever the edge colors. A panel may
+# exempt a specific pair only by declaring it in `allowed_crossings`
+# (and never under a planar binding layout); declared crossings still count
+# toward this per-path cap.
 MAX_CROSSINGS_PER_PATH = 2
 
 # ── Page-fill / dead-zone detection ──
@@ -272,7 +278,8 @@ def _on_rect_perimeter(px: float, py: float, r: Rect, tol: float) -> bool:
 
 
 def check_edge_endpoints_on_elements(
-    paths: list[EdgePath], elements: list[Rect], tol: float
+    paths: list[EdgePath], elements: list[Rect], tol: float,
+    exempt: "set[tuple[str, str]] | frozenset" = frozenset(),
 ) -> list[str]:
     """For every edge, warn if `points[0]` (source) or `points[-1]`
     (target) does not lie on any element's perimeter within `tol`.
@@ -282,12 +289,17 @@ def check_edge_endpoints_on_elements(
 
     Warning, not error: a legitimate free-floating endpoint is rare
     but allowed (e.g. an edge whose endpoint is a label that wasn't
-    registered as an element). Returns a list of warning strings."""
+    registered as an element). `exempt` holds `(path_name, "source" |
+    "target")` endpoints a binding layout declares as forks off another
+    edge — the layout check verifies those instead. Returns a list of
+    warning strings."""
     warnings: list[str] = []
     for p in paths:
         if len(p.points) < 2:
             continue
         for label, idx in (("source", 0), ("target", -1)):
+            if (p.name, label) in exempt:
+                continue
             px, py = p.points[idx]
             if not any(_on_rect_perimeter(px, py, r, tol) for r in elements):
                 warnings.append(
@@ -407,9 +419,9 @@ def _segments_intersect(
 def find_path_crossings(paths: list[EdgePath]) -> dict[str, list[dict]]:
     """Return every pairwise segment crossing, keyed by path name.
 
-    Both same-color and different-color crossings are included; callers
-    filter as needed (`check_path_crossings` keeps only same-color
-    pairs). Shared endpoints (paths meeting at a node) are not
+    Every crossing is included whatever the two paths' colors; callers
+    filter as needed (`check_path_crossings` drops declared
+    `allowed_crossings` pairs). Shared endpoints (paths meeting at a node) are not
     crossings and are excluded. Each crossing appears twice — once
     under each participating path — so `result[name]` lists everything
     `name` runs into.
@@ -456,28 +468,47 @@ def find_path_crossings(paths: list[EdgePath]) -> dict[str, list[dict]]:
     return crossings
 
 
-def check_path_crossings(paths: list[EdgePath]) -> list[str]:
+def _pair(a: str, b: str) -> frozenset[str]:
+    return frozenset((a, b))
+
+
+def check_path_crossings(
+    paths: list[EdgePath],
+    allowed_crossings: "list[tuple[str, str]] | tuple" = (),
+) -> list[str]:
     """Pairwise segment-intersection check across all paths. Returns a
     list of error strings (empty = OK).
 
-    Two error classes:
-      1. Same-color crossings (different colors are allowed to cross,
-         per `references/panel_agent.md`). Proper X-crossings and
-         collinear overlap count; shared endpoints at a common node
-         and T-junctions (endpoint on another path's interior) do NOT
-         — same-color T-junctions are the standard fan-in merge.
-      2. Any path involved in strictly more than
-         `MAX_CROSSINGS_PER_PATH` (= 2) crossings, regardless of color.
-         Even allowed (different-color) crossings cost legibility, and a
-         single arrow tangled through 3+ others is almost always a
-         routing bug rather than an intentional dense layout."""
-    crossings = find_path_crossings(paths)
+    Three error classes:
+      1. Any crossing between two paths, WHATEVER their colors, unless the
+         pair is declared in `allowed_crossings` (an unordered pair of path
+         names). Color is deliberately not an exemption: recoloring one edge
+         to dodge the check defeats monochrome palettes and still leaves the
+         reader a tangle. Proper X-crossings and collinear overlap count;
+         shared endpoints at a common node and T-junctions (an endpoint on
+         another path's interior — the fan-in / fork pattern) do NOT.
+      2. An `allowed_crossings` entry naming a path that does not exist (a
+         stale declaration would silently exempt a future edge).
+      3. Any path involved in strictly more than `MAX_CROSSINGS_PER_PATH`
+         (= 2) crossings, declared or not. A single arrow tangled through
+         3+ others is a routing bug rather than an intentional layout."""
+    names = {p.name for p in paths}
+    allowed: set[frozenset[str]] = set()
     errors: list[str] = []
+    for a, b in allowed_crossings:
+        unknown = [n for n in (a, b) if n not in names]
+        if unknown:
+            errors.append(
+                f"allowed_crossings entry ({a!r}, {b!r}) names unknown "
+                f"path(s) {', '.join(unknown)}; remove or fix it"
+            )
+        allowed.add(_pair(a, b))
 
+    crossings = find_path_crossings(paths)
     seen: set[tuple] = set()
     for name, records in crossings.items():
         for r in records:
-            if r["color"] != r["other_color"]:
+            if _pair(name, r["other"]) in allowed:
                 continue
             key = tuple(sorted([
                 (name, r["segment"]),
@@ -489,7 +520,9 @@ def check_path_crossings(paths: list[EdgePath]) -> list[str]:
             (n1, s1), (n2, s2) = key
             errors.append(
                 f"{n1} segment {s1[0]}->{s1[1]} crosses {n2} segment "
-                f"{s2[0]}->{s2[1]}; both color {r['color']}"
+                f"{s2[0]}->{s2[1]}; reroute so they do not cross (color does "
+                f"not exempt a crossing — only a declared allowed_crossings "
+                f"pair does)"
             )
 
     for name, records in crossings.items():
@@ -502,6 +535,78 @@ def check_path_crossings(paths: list[EdgePath]) -> list[str]:
             )
 
     return errors
+
+
+def _clip_to_rect(
+    p0: tuple[float, float], p1: tuple[float, float],
+    x0: float, y0: float, x1: float, y1: float,
+) -> float:
+    """Liang–Barsky: the parametric length (0..1) of segment p0-p1 that lies
+    strictly inside the open box (x0, y0)-(x1, y1). 0 when it misses."""
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, p0[0] - x0), (dx, x1 - p0[0]),
+                 (-dy, p0[1] - y0), (dy, y1 - p0[1])):
+        if p == 0:
+            if q <= 0:
+                return 0.0
+            continue
+        t = q / p
+        if p < 0:
+            t0 = max(t0, t)
+        else:
+            t1 = min(t1, t)
+        if t0 >= t1:
+            return 0.0
+    return t1 - t0
+
+
+def check_edges_through_elements(
+    paths: list[EdgePath], elements: list[Rect], tol: float = ENDPOINT_SNAP_TOL,
+) -> list[str]:
+    """Flag every path segment that runs through the INTERIOR of a node or
+    label `Rect` (each rect shrunk by `tol`, so an endpoint attached to a
+    side, or a segment grazing along a side, is not a pass-through — the
+    graze has its own warning). An arrow drawn across a box or over a label
+    reads as a connection that does not exist and hides the text; the
+    collision check cannot see it because paths are not rects. Containers
+    are not passed here: edges legitimately cross container borders, while
+    a container's title is a registered text `Rect` and so is protected.
+    Returns error strings."""
+    errors: list[str] = []
+    for p in paths:
+        for i in range(len(p.points) - 1):
+            a, b = p.points[i], p.points[i + 1]
+            for r in elements:
+                inside = _clip_to_rect(a, b, r.x + tol, r.y + tol,
+                                       r.x + r.w - tol, r.y + r.h - tol)
+                if inside > 0:
+                    errors.append(
+                        f"{p.name} segment {i}->{i+1} from {a} to {b} passes "
+                        f"through {r.name} [{r.x},{r.y},{r.w},{r.h}]; route "
+                        f"around it"
+                    )
+    return errors
+
+
+def _norm_hex(color: str) -> str:
+    return color.strip().upper()
+
+
+def check_edge_palette(
+    paths: list[EdgePath], palette: "list[str] | tuple[str, ...] | None",
+) -> list[str]:
+    """When the figure declares a closed `palette` (figure.json, from the
+    user's binding visual direction), every edge color must come from it —
+    no improvised secondary hues. `None` disables the check."""
+    if not palette:
+        return []
+    allowed = {_norm_hex(c) for c in palette}
+    return [
+        f"{p.name}: color {p.color} is not in the figure palette "
+        f"({', '.join(sorted(allowed))})"
+        for p in paths if _norm_hex(p.color) not in allowed
+    ]
 
 
 def _grid_dims(page_w: float, page_h: float) -> tuple[int, int]:
@@ -675,41 +780,188 @@ def check_corner_deadzones(
     return out
 
 
+# ── Rendered-template check ──
+# The geometry checks see Python's Rects / EdgePaths; the .drawio that ships
+# is the template filled with params. These must agree, or a template that
+# drops a waypoint slot (an arrow ending short of its box) or draws a cell
+# nobody registered passes every check above.
+def _num(v: "str | None") -> float:
+    return round(float(v), 1) if v not in (None, "") else 0.0
+
+
+def _key(*vals: float) -> tuple:
+    return tuple(round(float(v), 1) for v in vals)
+
+
+def check_rendered(
+    xml_text: str, elements: list[Rect], paths: list[EdgePath],
+    containers: "list[Rect] | tuple" = (),
+) -> list[str]:
+    """Compare a filled template (drawio XML) with the validated geometry.
+    Returns error strings (empty = the render is what was checked).
+
+      * Every edge cell that declares its polyline (sourcePoint / Array
+        points / targetPoint) must equal some `EdgePath.points` exactly, in
+        order (direction matters), and every EdgePath must be drawn. A
+        two-point EdgePath may instead be drawn by an edge wired with
+        `source=` / `target=` ids (no explicit points).
+      * Every vertex cell with geometry must sit exactly on a registered
+        Rect (element or container) and every registered Rect must be
+        drawn, so nothing visible escapes the collision / layout checks.
+    """
+    root = ET.fromstring(xml_text)
+    cells = list(root.iter("mxCell"))
+    parents = {c.get("id"): c for c in cells}
+
+    def origin(cell) -> tuple[float, float]:
+        pid = cell.get("parent")
+        parent = parents.get(pid)
+        if parent is None or parent.get("vertex") != "1":
+            return 0.0, 0.0
+        geo = parent.find("mxGeometry")
+        px, py = origin(parent)
+        return px + _num(geo.get("x")), py + _num(geo.get("y"))
+
+    errors: list[str] = []
+    want_rects = Counter(_key(r.x, r.y, r.w, r.h) for r in [*elements, *containers])
+    rect_names = {_key(r.x, r.y, r.w, r.h): r.name for r in [*elements, *containers]}
+    drawn_rects: Counter = Counter()
+    want_paths = Counter(_key(*[c for pt in p.points for c in pt]) for p in paths)
+    drawn_paths: Counter = Counter()
+    wired = 0
+    for c in cells:
+        geo = c.find("mxGeometry")
+        if geo is None:
+            continue
+        if c.get("vertex") == "1" and geo.get("relative") != "1":
+            ox, oy = origin(c)
+            k = _key(ox + _num(geo.get("x")), oy + _num(geo.get("y")),
+                     _num(geo.get("width")), _num(geo.get("height")))
+            drawn_rects[k] += 1
+            if want_rects[k] < drawn_rects[k]:
+                errors.append(f"vertex cell {c.get('id')} {list(k)} matches no registered "
+                              f"Rect; register it in build_elements() / build_containers() "
+                              f"at the position it is drawn")
+        elif c.get("edge") == "1":
+            pts = {mp.get("as"): mp for mp in geo.findall("mxPoint")}
+            if "sourcePoint" not in pts or "targetPoint" not in pts:
+                wired += 1
+                continue
+            arr = geo.find("Array")
+            mids = arr.findall("mxPoint") if arr is not None else []
+            seq = [pts["sourcePoint"], *mids, pts["targetPoint"]]
+            k = _key(*[_num(mp.get(a)) for mp in seq for a in ("x", "y")])
+            drawn_paths[k] += 1
+            if want_paths[k] < drawn_paths[k]:
+                pairs = list(zip(k[::2], k[1::2]))
+                errors.append(f"edge cell {c.get('id')} polyline {pairs} matches no "
+                              f"EdgePath; its template points must be exactly "
+                              f"EdgePath.points (source, every waypoint, target)")
+    for k, n in (want_rects - drawn_rects).items():
+        errors.append(f"Rect {rect_names[k]} {list(k)} is not drawn by any vertex cell "
+                      f"at that geometry")
+    unmatched = [p for p in paths
+                 if (want_paths - drawn_paths)[_key(*[c for pt in p.points for c in pt])]]
+    seen: set[str] = set()
+    for p in unmatched:
+        if len(p.points) == 2 and wired > 0:
+            wired -= 1
+            continue
+        if p.name not in seen:
+            seen.add(p.name)
+            errors.append(f"{p.name}: validated polyline {p.points} is not drawn by any "
+                          f"edge cell (the template's points must be exactly "
+                          f"EdgePath.points)")
+    return errors
+
+
+def enforce_rendered(
+    xml_text: str, elements: list[Rect], paths: list[EdgePath],
+    containers: "list[Rect] | tuple" = (),
+) -> None:
+    """Abort (`SystemExit(1)`) when the filled template diverges from the
+    validated geometry (see `check_rendered`). Call it in `main()` before
+    writing the `.drawio`; never bypassable."""
+    errors = check_rendered(xml_text, elements, paths, containers)
+    if errors:
+        for e in errors:
+            print(f"RENDER: {e}", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def run_checks(
     elements: list[Rect], paths: list[EdgePath], page_w: float, page_h: float,
+    *,
+    containers: "list[Rect] | tuple" = (),
+    allowed_crossings: "list[tuple[str, str]] | tuple" = (),
+    layout=None,
+    palette: "list[str] | tuple[str, ...] | None" = None,
 ) -> tuple[list[str], list[str]]:
     """Run every panel geometry check and return `(errors, warnings)`.
 
     Errors block generation unconditionally; warnings block unless bypassed
     (see `enforce`). This is the single place the individual checks are
     wired together, so a panel's `build_params()` never re-implements the
-    assembly — it calls `enforce(...)`."""
+    assembly — it calls `enforce(...)`.
+
+    Optional inputs:
+      * `containers` — group/zone rects (not in `elements`, since members sit
+        inside them). They count as valid edge endpoints and are handed to
+        the layout check.
+      * `allowed_crossings` — unordered path-name pairs allowed to cross.
+      * `layout` — the panel's binding layout (a `panel_layout.LayoutSpec`,
+        duck-typed: `.planar`, `.fork_endpoints(paths)`, and
+        `.check(elements, paths, containers) -> (errors, warnings)`).
+      * `palette` — the figure's closed color set; edge colors must be in it.
+    """
     errors = check_collisions(elements, COLLISION_MARGIN, page_w, page_h)
     ortho_errors, ortho_warnings = check_orthogonal_waypoints(paths)
     errors += ortho_errors
     errors += check_short_segments(paths, MIN_SEGMENT_LEN)
-    errors += check_path_crossings(paths)
+    if layout is not None and layout.planar and allowed_crossings:
+        errors.append(
+            f"the binding layout is planar: allowed_crossings must be empty "
+            f"(got {list(allowed_crossings)}); reroute instead"
+        )
+        allowed_crossings = ()
+    errors += check_path_crossings(paths, allowed_crossings)
+    errors += check_edges_through_elements(paths, elements)
+    errors += check_edge_palette(paths, palette)
+    exempt = layout.fork_endpoints(paths) if layout is not None else frozenset()
     warnings = ortho_warnings
-    warnings += check_edge_endpoints_on_elements(paths, elements, ENDPOINT_SNAP_TOL)
+    warnings += check_edge_endpoints_on_elements(
+        paths, [*elements, *containers], ENDPOINT_SNAP_TOL, exempt)
     warnings += check_endpoint_grazes_element(paths, elements, ENDPOINT_SNAP_TOL)
     warnings += check_page_fill(elements, paths, page_w, page_h)
     warnings += check_corner_deadzones(elements, paths, page_w, page_h)
+    if layout is not None:
+        layout_errors, layout_warnings = layout.check(elements, paths, containers)
+        errors += layout_errors
+        warnings += layout_warnings
     return errors, warnings
 
 
 def enforce(
     elements: list[Rect], paths: list[EdgePath],
     page_w: float, page_h: float, bypass_warnings: bool = False,
+    *,
+    containers: "list[Rect] | tuple" = (),
+    allowed_crossings: "list[tuple[str, str]] | tuple" = (),
+    layout=None,
+    palette: "list[str] | tuple[str, ...] | None" = None,
 ) -> None:
     """Run all checks, print any warnings/errors to stderr, and abort
     (`SystemExit(1)`) on any error — or on any warning unless
     `bypass_warnings=True`. Called from every panel's `build_params()`.
+    The keyword-only inputs are forwarded to `run_checks`.
 
     Errors are never bypassable. Warnings block too, unless
     `bypass_warnings=True` (surfaced as `--bypass-warnings` on the CLI) —
     pass it ONLY when every warning above has been reviewed and each one
     has a valid reason to be bypassed."""
-    errors, warnings = run_checks(elements, paths, page_w, page_h)
+    errors, warnings = run_checks(
+        elements, paths, page_w, page_h, containers=containers,
+        allowed_crossings=allowed_crossings, layout=layout, palette=palette)
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
     if errors:

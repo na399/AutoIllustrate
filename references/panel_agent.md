@@ -23,8 +23,12 @@ The dispatcher passes the panel agent these handles:
   `mktemp -d`); every artifact this agent produces lives here.
 - `$WORKDIR/figure.json` — the figure plan; the agent reads its own
   panel entry by `panel_id` and uses the panel's `drawio_prompt`,
-  `proportion_w`, and `proportion_h` (the last two drive PAGE_W /
-  PAGE_H — see "Panel size from figure.json proportions" below).
+  `proportion_w`, and `proportion_h` (with the top-level `canvas_w` /
+  `canvas_h` they drive PAGE_W / PAGE_H — see "Panel size from
+  figure.json proportions" below). If
+  the panel entry has a `layout_spec`, it is a **binding layout** (see
+  "Binding layouts" below); a top-level `palette` / `style_constraints`
+  restricts the colors and look.
 - `$WORKDIR/methods.md` — methodology brief; every shape, arrow, and
   label this panel emits must be traceable to a fact in this file.
 - `$WORKDIR/theme.txt` — the figure-wide theme; the panel agent
@@ -169,16 +173,65 @@ checks in the generator. The checks `enforce` runs include:
    that is expected; at step 5 you decide whether to keep it or add
    an orthogonal waypoint.
 
-3. **No same-color path crossings** — pairwise segment intersection
-   across all `EdgePath`s, skipping pairs where the two paths have
-   different `color` (different colors may cross). Shared endpoints at
-   a common node do NOT count as a crossing.
+3. **No path crossings** — pairwise segment intersection across all
+   `EdgePath`s, **whatever their colors**. Color is not an exemption:
+   recoloring one edge to slip past the check defeats monochrome
+   palettes and still leaves a tangle. The only exemption is an
+   explicitly declared pair in the generator's `ALLOWED_CROSSINGS`
+   (never allowed under a planar binding layout), and declared
+   crossings still count toward the 2-crossings-per-edge cap. Shared
+   endpoints at a common node and T-junction forks (an endpoint on
+   another edge's interior) do NOT count as crossings.
+
+4. **No edge through a node or label** — a segment that enters the
+   interior of any registered `Rect` (node, edge label, container title,
+   placeholder) is an error. Attaching to a side or running along one is
+   not a pass-through.
+
+5. **Palette** — when `figure.json` declares a `palette`, every
+   `EdgePath.color` must be one of its colors.
+
+6. **Binding layout** — when the panel has a `layout_spec`, the geometry
+   must match it (see "Binding layouts").
+
+7. **Render matches geometry** — `main()` fills the template and calls
+   `enforce_rendered(...)` before writing the `.drawio`, and the
+   contract self-test (`check_params_contract.py`) repeats it: every edge
+   cell's sourcePoint / waypoints / targetPoint must be exactly some
+   `EdgePath.points` (same order), every vertex cell must sit exactly on a
+   registered `Rect` (element or container), and every `Rect` / `EdgePath`
+   must be drawn. A template with fewer waypoint slots than its
+   `EdgePath` (the arrow stops short of its box) or an unregistered cell
+   fails here.
+
+8. **Labels fit their boxes** — `main()` then calls
+   `enforce_text_fit(xml, bypass_warnings=...)` (from `panel_text.py`),
+   and the contract self-test repeats it. It lays every labelled vertex
+   cell out the way draw.io exports it: `<br>` / newlines break lines,
+   `whiteSpace=wrap` wraps at spaces (and after hyphens) inside the cell
+   width minus `spacing` (+2 px), each line box is `fontSize x 1.2`, and
+   glyph widths come from the Helvetica / Helvetica-Bold metrics.
+   - **Error:** the glyphs spill outside the box. This covers more
+     `<br>` lines than the height holds (`Python host:<br>compile,
+     measure,<br>rank, journal` in a 46 px box), a `<br>` line that
+     wraps and adds a line, a `_title` or `_label` Rect one line tall
+     whose text wraps to two (an edge then runs through the visible
+     words), and an unbreakable word or non-wrapping label wider than
+     the box.
+   - **Warning (bordered cells only):** the glyphs fit but touch the
+     border, or stick out of an ellipse / rhombus outline.
+   Fix it by sizing the Rect from `label_size(value, font_size,
+   box_width=W)`, which returns the `(w, h)` the wrapped label needs.
+   Otherwise widen the box so the line stops wrapping, or shorten or
+   rebreak the label. Never shrink `fontSize` below 14 to get under
+   the check. Labels placed outside their shape, edge labels, MathJax
+   labels and `[[ pl ]]` / `[[ mp ]]` tokens are not checked.
 
 (plus the short-segment, dangling-endpoint, page-fill, and corner
 dead-zone checks — all wired into `enforce`.) See
 `references/python_layout.md` for the `Rect` / `EdgePath` dataclasses and
-the full check list; all of it lives in `panel_geometry.py`, which you
-import but never edit.
+the full check list; all of it lives in `panel_geometry.py` (and the
+text-fit check in `panel_text.py`), which you import but never edit.
 
 ### No `orthogonalEdgeStyle` (or any auto-routing)
 
@@ -231,16 +284,18 @@ it.)
 
 Every edge mxCell's `strokeColor` must be a `{placeholder}` filled
 from the matching `EdgePath.color`. Hardcoded hex literals like
-`strokeColor=#1f78b4` in an edge style are forbidden — the crossing
-check needs Python to be the single source of truth for color, or
-"different colors are allowed to cross" cannot be enforced.
-`lint_math.py` enforces this at step 4.
+`strokeColor=#1f78b4` in an edge style are forbidden — Python must be
+the single source of truth for color, so the palette check sees the
+color that is drawn. `lint_math.py` enforces this at step 4 (and, when
+`figure.json` has a `palette`, rule (j) also rejects any off-palette
+fill / stroke / font color in the template).
 
 ### Edge stroke weight and dashes
 
 Every edge mxCell carries `strokeWidth=3` — 3pt arrows stay legible
 once the figure is scaled into a paper column; thinner strokes wash
-out. Every dashed edge MUST pin its dash pattern with
+out — unless `style.md` records a different width from the user's
+binding `style_constraints`, which wins. Every dashed edge MUST pin its dash pattern with
 `dashed=1;dashPattern=4 2;` — drawio's default dash spacing is never
 relied on, so all dashed arrows render identically. Solid edges carry
 neither `dashed` nor `dashPattern`. See
@@ -250,14 +305,20 @@ neither `dashed` nor `dashPattern`. See
 
 The panel's `figure.json` entry carries `proportion_w` and
 `proportion_h` (each in (0, 1]) — its share of the composite's
-inner width and height. Set `PAGE_W` / `PAGE_H` in
-`generate_<panel_id>.py` to match:
+inner canvas, which figure.json records as the top-level `canvas_w` /
+`canvas_h`. Set `PAGE_W` / `PAGE_H` in `generate_<panel_id>.py` to
+match:
 
 ```
-inner = (2000, 832) if placement == "full-width" else (2000, 1104)
-PAGE_W = round(proportion_w * inner_w)
-PAGE_H = round(proportion_h * inner_h)
+PAGE_W = round(proportion_w * canvas_w)
+PAGE_H = round(proportion_h * canvas_h)
 ```
+
+The canvas is 2000 x 832 (full-width) or 2000 x 1104 (half-width)
+unless a panel has a binding `layout_spec`. In that case Phase 1 grew
+the canvas height so every layout panel's page has its grid's natural
+aspect, and a tall grid gets a tall page (an older figure.json without
+`canvas_w` / `canvas_h` uses the placement default).
 
 Soft ±15% tolerance on each axis. The Phase 3 inspect agent flags a
 `check: "dimensions"` critical issue if the rendered PNG drifts
@@ -272,6 +333,66 @@ when a dense label genuinely cannot fit otherwise, and prefer
 enlarging the cell or shortening the text first. If the Phase 3
 inspect agent flags an illegible label, bump `fontSize` (toward 14+)
 rather than shrinking it further.
+
+## Binding layouts (`layout_spec`)
+
+When the user supplies a layout (an ASCII grid, "A above B", explicit
+edge routes), Phase 1 records it as the panel's `layout_spec` in
+`figure.json`. It is binding: reproduce it, do not re-place nodes.
+
+```json
+{"rows": 4, "cols": 3, "planar": true,
+ "nodes": [{"id": "training", "row": 1, "col": 0, "label": "Training records<br>and labels"}],
+ "containers": [{"id": "development_data", "title": "Development data",
+                 "members": ["training", "validation"], "optional": false}],
+ "edges": [{"id": "training_generate", "source": "training", "target": "generate",
+            "exit": "right", "entry": "left"},
+           {"id": "tagger_host", "source": "tagger_generate", "target": "host",
+            "entry": "top", "label": "span evidence", "dashed": true,
+            "route": "forks from the Tagger trunk"}]}
+```
+
+Rows / cols are 0-based grid cells (`rowspan` / `colspan` optional). An
+edge's `source` / `target` is a node, a container, or another edge's id
+(a fork off / merge onto that edge's polyline); `exit` / `entry` name the
+side it leaves / enters; `route` is a prose hint for you.
+
+The generator template loads it (`LAYOUT = load_layout_spec(PANEL_ID)`)
+and passes it to `enforce(..., layout=LAYOUT)`, which errors unless:
+
+- every node is a `Rect` named by its id; a node in an earlier row sits
+  entirely above every node in a later row, nodes sharing a row overlap
+  vertically (aligned), and the same holds for columns left to right.
+  You choose the pixel pitches: `GridFrame(LAYOUT, col_edges,
+  row_edges).rect(node_id, w, h)` centres a node in its cell, and
+  `GridFrame.fit(LAYOUT, PAGE_W, PAGE_H)` gives a frame whose tracks
+  keep the natural widths / heights Phase 1 sized the page from (each
+  track fits its labelled boxes; empty tracks are routing channels);
+- every container is a `Rect` returned by `build_containers()`, named by
+  its id, that encloses its members and its title `Rect`
+  (`<container_id>_title`, registered in `build_elements()`); the title
+  sits above every member (its own header band), and no other node sits
+  inside the container;
+- exactly the spec's edges are drawn, each an `EdgePath` named by its id,
+  leaving / entering on the declared sides (a fork starts on its parent
+  edge), and every labelled edge has an `<edge_id>_label` `Rect` within
+  30 px of that edge's polyline;
+- `planar: true` (the default): zero crossings, `ALLOWED_CROSSINGS` empty.
+
+A reliable recipe: choose `col_edges` / `row_edges` that leave a gap
+(a routing channel) between neighbouring columns and rows; place every
+node with `GridFrame.rect`; route each edge orthogonally from its exit
+side into the nearest channel, along it, and out to its entry side —
+long or feedback edges ride the page margins or a channel row past
+everything else; set each edge label beside one of its segments inside
+a channel, clear of other lines. Re-run the generator after every
+change and fix what it reports until it passes — a binding layout is
+satisfiable by construction, so a failing check means the geometry
+still needs work, not that the layout is impossible.
+
+Use each node's `label` text verbatim. Solid/dashed, the edge labels'
+text, and which nodes are data / process / result come from the spec,
+the `drawio_prompt`, and `style.md`.
 
 ## Deferring complex visuals (placeholders)
 
@@ -523,7 +644,10 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
    alongside the panel's other artifacts; matplotlib entries also
    carry `script_filename` and `intended_dimensions` — see the
    "Deferring complex visuals (placeholders)" section above). Keep
-   the plan section to ~15–40 lines, bullets over prose.
+   the plan section to ~15–40 lines, bullets over prose. If the panel
+   has a `layout_spec`, quote it (as JSON, under a `## Layout` heading)
+   after the prompt and derive the paradigm, inventory and arrow budget
+   from it instead of choosing your own arrangement.
 
    **Label budget.** Canvas labels are *names, not explanations* — a
    noun phrase, symbol, or short imperative, never a full sentence. The
@@ -565,18 +689,16 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
      a labelled group is usually clearer. If two arrows convey the
      same conceptual step at different abstraction levels, keep the
      one that matches this panel's grain and drop the other.
-   - Prefer few crossings: order nodes along the dominant flow axis
-     so arrows go forward and route feedback edges around (not
-     through) the main flow. When a crossing is the cleaner drawing
-     (two edges that swap lanes, a diagonal that would otherwise need
-     a long detour), draw it and give the two crossing edges two different
-     colors from `style.md`'s secondary edge pool — those colors are
-     role-free, so the two members of a same-role pair may differ in
-     hue; the label and solid/dashed carry the meaning. The Python
-     crossing check only forbids same-color crossings; differently-
-     coloured crossings are allowed but each one is another spot the
-     Phase 5 enhancer can mis-redraw, so weigh a crossing against the
-     detour it saves.
+   - Plan for zero crossings: order nodes along the dominant flow
+     axis so arrows go forward, and route feedback / long edges around
+     (not through) the main flow, in the margins or in a dedicated
+     channel between rows or columns. Never change an edge's color to
+     make a crossing pass — the check ignores color. In the rare case
+     a crossing is genuinely the cleaner drawing (two edges that swap
+     lanes where any detour is worse), declare that one pair in
+     `ALLOWED_CROSSINGS` and justify it under `Arrow budget`; each one
+     is another spot the Phase 5 enhancer can mis-redraw. Under a
+     planar binding layout, crossings are never allowed.
 
 2. **Create `WD/<panel_id>.drawio.template`** — draw.io XML with
    `{placeholder}` slots for every position and size. The template must
@@ -634,8 +756,10 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
    → produces `$WORKDIR/<panel_id>.drawio`. The script does NOT run
    while EITHER errors or warnings remain:
    - **Errors** (collision, zero-length / collinear waypoint,
-     too-short segment, same-color crossing) always abort and are
-     never bypassable — fix the geometry.
+     too-short segment, any undeclared crossing, edge through a node
+     or label, off-palette edge color, binding-layout mismatch) always
+     abort and are never bypassable — fix the geometry, never the
+     colors.
    - **Warnings** (diagonal segment / missing orthogonal waypoint,
      dangling edge endpoint, low page fill / corner dead-zone) also
      abort, printing a `BLOCKED:` line. Read each one and use your
@@ -668,7 +792,9 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
    It exits 0 on success; on failure it prints a `CONTRACT:` line
    naming the fix (commonly: `build_params(bypass_warnings: bool =
    False)` must accept that arg — keep the template signature — and
-   must return `page_w`/`page_h`). Fix, re-run the generator, and
+   must return `page_w`/`page_h`; `RENDER:` lines mean the filled
+   template does not draw exactly the validated geometry — see check 7
+   above). Fix, re-run the generator, and
    repeat until it passes; never report `status: "ok"` while it fails.
 
 6. **Fulfill matplotlib placeholders** — skip entirely if
@@ -783,6 +909,14 @@ For a panel with id `<panel_id>` and workdir `WD = $WORKDIR`:
 - `assets/panel_geometry.py` — the shared, fixed geometry-validation
   library (Rect / EdgePath + all checks + `enforce`) that every
   generator imports; staged into the workdir, never edited per panel.
+- `assets/panel_layout.py` — loads the panel's binding `layout_spec` and
+  the figure `palette` from `figure.json`, checks geometry against the
+  layout (via `enforce(layout=...)`), and provides `GridFrame`; staged
+  into the workdir, never edited per panel.
+- `assets/panel_text.py` — estimates each filled cell's wrapped label
+  from Helvetica metrics: `check_text_fit` / `enforce_text_fit` (labels
+  must fit their boxes) and `label_size` (the box a label needs); staged
+  into the workdir, never edited per panel.
 - `assets/mpl_panel_template.py` — the copy-and-modify skeleton for
   each per-placeholder `mpl_<panel_id>_<id>.py` (LaTeX-on,
   schematic-by-default styling, correct figsize/DPI idiom).

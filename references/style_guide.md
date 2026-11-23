@@ -146,13 +146,14 @@ across papers — two different figures should rarely land on the same anchor.
 - Stroke color comes from the palette's **edge** color, never black default.
   (The per-panel Python still owns the exact hex via a placeholder for the
   crossing check — the Style phase just names which color.)
-- Also name **2–3 secondary edge colors** for arrows that must cross. The
-  crossing check rejects same-colored intersecting edges outright, so a
-  palette with one edge color makes every unavoidable crossing a hard
-  failure in Phase 2. These are a role-free pool, not semantic roles: the
-  two edges of a crossing pair may take two different pool colors even
-  when they mean the same thing (meaning lives in solid/dashed and the
-  label, not the hue).
+- One edge color is enough. Crossings are resolved by routing, not hue:
+  the crossing check rejects every crossing whatever its colors, so a
+  "secondary edge pool" buys nothing. Add a second edge color only when
+  it carries meaning the figure needs (e.g. a muted grey for optional /
+  auxiliary dashed edges), and name what it means.
+- If `figure.json` has `style_constraints` / `palette` (the user's binding
+  visual direction), they override everything in this guide: use exactly
+  those colors, strokes and fonts, and add no others.
 - `strokeWidth=3` so arrows survive downscaling into a paper column.
 - **Solid** = forward data flow. **Dashed** (`dashed=1;dashPattern=4 2`) =
   auxiliary flow (gradients, skip/feedback, loss). This solid/dashed split

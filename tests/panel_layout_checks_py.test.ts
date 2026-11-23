@@ -342,13 +342,29 @@ test("run_checks wiring: the warning checks are called in the library's warnings
 test("generate_panel_template imports the shared library and calls enforce()", () => {
   const tpl = fs.readFileSync(path.resolve("assets/generate_panel_template.py"), "utf8");
   assert.ok(
-    /from panel_geometry import Rect, EdgePath, enforce/.test(tpl),
+    /from panel_geometry import Rect, EdgePath, enforce\b/.test(tpl),
     "the template must import Rect/EdgePath/enforce from panel_geometry",
   );
   assert.ok(
-    /enforce\(elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings\)/.test(tpl),
-    "build_params must delegate its checks to enforce()",
+    /enforce\(\s*elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings,\s*containers=containers, allowed_crossings=ALLOWED_CROSSINGS,\s*layout=LAYOUT, palette=PALETTE,?\s*\)/.test(tpl),
+    "build_params must delegate its checks to enforce(), passing containers, declared crossings, the layout spec and the palette",
   );
+  assert.ok(
+    /from panel_layout import (GridFrame, )?load_layout_spec, load_palette/.test(tpl),
+    "the template must load the panel's binding layout + palette from figure.json",
+  );
+  assert.ok(/LAYOUT = load_layout_spec\(PANEL_ID\)/.test(tpl), "LAYOUT comes from figure.json");
+  assert.ok(
+    /PANEL_ID = Path\(__file__\)\.stem\.removeprefix\("generate_"\)/.test(tpl),
+    "PANEL_ID is derived from the generator's filename so the layout lookup cannot silently miss",
+  );
+  assert.ok(/PALETTE = load_palette\(\)/.test(tpl), "PALETTE comes from figure.json");
+  assert.ok(
+    /xml = template\.format\(\*\*params\)\s*\n\s*enforce_rendered\(xml, build_elements\(\), build_paths\(\), build_containers\(\)\)/.test(tpl),
+    "main() must verify the filled template draws exactly the validated geometry before writing",
+  );
+  assert.ok(/from panel_geometry import Rect, EdgePath, enforce, enforce_rendered/.test(tpl));
+  assert.ok(/ALLOWED_CROSSINGS: list\[tuple\[str, str\]\] = \[\]/.test(tpl), "no crossings are declared by default");
   assert.ok(
     /sys\.path\.insert\(0, str\(Path\(__file__\)\.resolve\(\)\.parent\)\)/.test(tpl),
     "the template must self-bootstrap its own dir onto sys.path before importing",

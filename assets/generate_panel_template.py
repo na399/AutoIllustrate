@@ -9,13 +9,15 @@
 # references/panel_agent.md "No XML generation in Python".)
 #
 # All the FIXED geometry validation (collision, orthogonal-waypoint,
-# short-segment, path-crossing, dangling-endpoint, page-fill and corner
-# dead-zone checks, plus the Rect / EdgePath types) lives in the shared
-# `panel_geometry` module — staged into this workdir next to the
-# generators. Do NOT copy those checks in here; import them (below) and
-# call `enforce(...)` from build_params(). Only panel-specific geometry
-# (page size, element sizes, layout params, build_elements/build_paths)
-# belongs in this file.
+# short-segment, path-crossing, edge-through-element, palette,
+# dangling-endpoint, page-fill and corner dead-zone checks, plus the
+# Rect / EdgePath types) lives in the shared `panel_geometry` module;
+# `panel_layout` loads this panel's binding layout (figure.json
+# `layout_spec`) and the figure palette. Both are staged into this workdir
+# next to the generators. Do NOT copy those checks in here; import them
+# (below) and call `enforce(...)` from build_params(). Only panel-specific
+# geometry (page size, element sizes, layout params, build_elements /
+# build_containers / build_paths) belongs in this file.
 from pathlib import Path
 import argparse
 import math
@@ -27,14 +29,40 @@ import sys
 # generate_composite.py, or by scripts/check_params_contract.py. `__file__`
 # is the generator's path in the workdir in every one of those contexts.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from panel_geometry import Rect, EdgePath, enforce  # noqa: E402
+from panel_geometry import Rect, EdgePath, enforce, enforce_rendered  # noqa: E402
+from panel_layout import GridFrame, load_layout_spec, load_palette  # noqa: E402
+from panel_text import enforce_text_fit, label_size  # noqa: E402
 
-# ── Page ──
+# This generator is generate_<panel_id>.py, so the id comes from the filename.
+PANEL_ID = Path(__file__).stem.removeprefix("generate_")
+
+# ── Binding constraints from figure.json ──
+# LAYOUT is None unless Phase 1 recorded a binding layout for this panel.
+# When it is set, place every node in its grid cell (GridFrame.fit(LAYOUT,
+# PAGE_W, PAGE_H) gives cells sized to the labels, as Phase 1 sized the page), name
+# each node Rect / container Rect / EdgePath by its spec id, give each
+# container title a `<container_id>_title` Rect and each labelled edge an
+# `<edge_id>_label` Rect, and draw exactly the spec's edges on the declared
+# sides — `enforce` checks all of it. PALETTE (if set) closes the edge colors.
+LAYOUT = load_layout_spec(PANEL_ID)
+PALETTE = load_palette()
+
+# Crossings are errors whatever the edge colors. Declare a pair here ONLY
+# when a crossing is genuinely the cleaner drawing (justify it in the plan);
+# never under a planar LAYOUT. Recoloring an edge does not exempt it.
+ALLOWED_CROSSINGS: list[tuple[str, str]] = []
+
+# ── Page ── (proportion_w * canvas_w, proportion_h * canvas_h from figure.json)
 PAGE_W, PAGE_H = 1000, 540
 
 # ── Element sizes ──
 NODE_W, NODE_H = 120, 48
 # ... all sizes as constants ...
+# Size every labelled Rect (nodes, `_label`s, `_title`s) to fit its text:
+# label_size(value, font_size, box_width=W) gives the (w, h) the wrapped label
+# needs inside a box W wide (font_size and bold as in the template's style),
+# e.g. NODE_H = max(NODE_H, math.ceil(label_size("Two-line<br>label", 14, box_width=NODE_W)[1])).
+# main() rejects a filled template whose labels overflow (enforce_text_fit).
 
 # ── Layout parameters ──
 COL_GAP = 200              # center-to-center between columns
@@ -48,7 +76,12 @@ CROSS_LABEL_PERP_OFFSET = 16  # perpendicular push outward from diagonal
 
 
 def build_elements() -> list[Rect]:
-    # return ALL visible elements including edge labels
+    # return ALL visible elements including edge labels and container titles
+    return [ ... ]
+
+def build_containers() -> list[Rect]:
+    # group / zone boxes that enclose other elements (kept out of
+    # build_elements so members do not "collide" with their container)
     return [ ... ]
 
 def build_paths() -> list[EdgePath]:
@@ -78,8 +111,13 @@ def build_params(bypass_warnings: bool = False) -> dict:
     has a valid reason to be bypassed.
     """
     elements = build_elements()
+    containers = build_containers()
     paths = build_paths()
-    enforce(elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings)
+    enforce(
+        elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings,
+        containers=containers, allowed_crossings=ALLOWED_CROSSINGS,
+        layout=LAYOUT, palette=PALETTE,
+    )
     return dict(...)  # all computed positions as ints, plus every path's points + color
 
 def _assert_param_contract(params: dict) -> None:
@@ -114,8 +152,12 @@ def main():
     args = parser.parse_args()
     params = build_params(bypass_warnings=args.bypass_warnings)
     _assert_param_contract(params)
-    template = Path("name.drawio.template").read_text()
-    Path("name.drawio").write_text(template.format(**params))
+    here = Path(__file__).resolve().parent
+    template = (here / f"{PANEL_ID}.drawio.template").read_text()
+    xml = template.format(**params)
+    enforce_rendered(xml, build_elements(), build_paths(), build_containers())
+    enforce_text_fit(xml, bypass_warnings=args.bypass_warnings)
+    (here / f"{PANEL_ID}.drawio").write_text(xml)
 
 
 if __name__ == "__main__":

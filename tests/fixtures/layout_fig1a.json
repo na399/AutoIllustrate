@@ -1,0 +1,83 @@
+{
+  "_comment": "FlowBuilder Figure 1A: the approved ASCII layout transcribed as a layout_spec, plus panel geometry adapted from the hand-built reference (runs-codex/flowbuilder/final/build_figures.py) so it is planar and clean under panel_geometry. Used by tests/panel_layout_spec_py.test.ts.",
+  "page": [1160, 800],
+  "palette": ["#1F2328", "#3C4043", "#5F6368", "#9AA0A6", "#F1F3F5", "#FAFBFC", "#FFFFFF", "#0F5E5E"],
+  "layout_spec": {
+    "rows": 4,
+    "cols": 3,
+    "planar": true,
+    "nodes": [
+      {"id": "seed", "row": 0, "col": 1, "label": "Definition-derived<br>seed criteria"},
+      {"id": "tagger", "row": 0, "col": 2, "label": "Optional Tagger spans:<br>construction evidence only"},
+      {"id": "training", "row": 1, "col": 0, "label": "Training records<br>and labels"},
+      {"id": "generate", "row": 1, "col": 1, "label": "Generate predicates; fit Boolean<br>programs or integer scorecards"},
+      {"id": "validation", "row": 2, "col": 0, "label": "Validation records<br>and labels"},
+      {"id": "select", "row": 2, "col": 1, "label": "Select starting classifier<br>by validation F1"},
+      {"id": "selected", "row": 2, "col": 2, "label": "Selected program<br>with identity and lineage"},
+      {"id": "llm", "row": 3, "col": 1, "label": "LLM through<br>controller and<br>Pi runtime"},
+      {"id": "host", "row": 3, "col": 2, "label": "Python host:<br>compile, measure,<br>rank, journal"}
+    ],
+    "containers": [
+      {"id": "development_data", "title": "Development data", "members": ["training", "validation"]},
+      {"id": "lite", "title": "FlowBuilder-Lite · Rust core", "members": ["generate", "select"]},
+      {"id": "agentic", "title": "Optional FlowBuilder-Agentic refinement", "members": ["llm", "host"], "optional": true}
+    ],
+    "edges": [
+      {"id": "training_generate", "source": "training", "target": "generate", "exit": "right", "entry": "left"},
+      {"id": "validation_select", "source": "validation", "target": "select", "exit": "right", "entry": "left"},
+      {"id": "seed_generate", "source": "seed", "target": "generate", "exit": "bottom", "entry": "top"},
+      {"id": "generate_select", "source": "generate", "target": "select", "exit": "bottom", "entry": "top"},
+      {"id": "select_selected", "source": "select", "target": "selected", "exit": "right", "entry": "left"},
+      {"id": "record_text", "source": "development_data", "target": "tagger", "exit": "top", "entry": "top", "label": "record text", "dashed": true, "route": "up out of Development data, along the top margin, down into Tagger"},
+      {"id": "tagger_generate", "source": "tagger", "target": "generate", "exit": "bottom", "entry": "right", "label": "training spans", "dashed": true},
+      {"id": "tagger_host", "source": "tagger_generate", "target": "host", "entry": "top", "label": "span evidence", "dashed": true, "route": "forks from the Tagger trunk"},
+      {"id": "select_host", "source": "select", "target": "host", "exit": "bottom", "entry": "top", "label": "optional refinement", "dashed": true},
+      {"id": "host_selected", "source": "host", "target": "selected", "exit": "top", "entry": "bottom", "label": "refined"},
+      {"id": "host_llm", "source": "host", "target": "llm", "exit": "left", "entry": "right", "label": "training evidence<br>and feedback"},
+      {"id": "llm_host", "source": "llm", "target": "host", "exit": "right", "entry": "left", "label": "candidate edits"},
+      {"id": "dev_host", "source": "development_data", "target": "host", "exit": "bottom", "entry": "bottom", "label": "training and validation records", "route": "under everything, along the bottom margin"}
+    ]
+  },
+  "elements": [
+    ["seed", 460, 60, 260, 70],
+    ["tagger", 850, 60, 300, 70],
+    ["training", 40, 215, 230, 70],
+    ["generate", 345, 210, 350, 80],
+    ["validation", 40, 375, 230, 70],
+    ["select", 345, 370, 350, 80],
+    ["selected", 760, 370, 280, 80],
+    ["llm", 530, 600, 230, 100],
+    ["host", 920, 600, 220, 100],
+    ["development_data_title", 34, 156, 230, 26],
+    ["lite_title", 334, 156, 290, 26],
+    ["agentic_title", 514, 546, 340, 26],
+    ["record_text_label", 460, 1, 240, 22],
+    ["tagger_generate_label", 720, 223, 240, 22],
+    ["tagger_host_label", 994, 319, 112, 22],
+    ["select_host_label", 615, 490, 240, 22],
+    ["host_selected_label", 1020, 471, 80, 22],
+    ["host_llm_label", 765, 580, 150, 40],
+    ["llm_host_label", 765, 679, 150, 22],
+    ["dev_host_label", 400, 735, 320, 22]
+  ],
+  "containers": [
+    ["development_data", 20, 150, 270, 320],
+    ["lite", 320, 150, 400, 330],
+    ["agentic", 500, 540, 660, 180]
+  ],
+  "paths": [
+    ["training_generate", "#3C4043", [[270, 250], [345, 250]]],
+    ["validation_select", "#3C4043", [[270, 410], [345, 410]]],
+    ["seed_generate", "#3C4043", [[670, 130], [670, 210]]],
+    ["generate_select", "#3C4043", [[520, 290], [520, 370]]],
+    ["select_selected", "#3C4043", [[695, 410], [760, 410]]],
+    ["record_text", "#9AA0A6", [[60, 150], [60, 26], [1110, 26], [1110, 60]]],
+    ["tagger_generate", "#9AA0A6", [[1110, 130], [1110, 250], [695, 250]]],
+    ["tagger_host", "#9AA0A6", [[1110, 250], [1110, 600]]],
+    ["select_host", "#9AA0A6", [[520, 450], [520, 515], [950, 515], [950, 600]]],
+    ["host_selected", "#3C4043", [[1010, 600], [1010, 450]]],
+    ["host_llm", "#3C4043", [[920, 630], [760, 630]]],
+    ["llm_host", "#3C4043", [[760, 672], [920, 672]]],
+    ["dev_host", "#3C4043", [[155, 470], [155, 760], [1030, 760], [1030, 700]]]
+  ]
+}

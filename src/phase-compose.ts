@@ -8,16 +8,16 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { agentInvoke } from "./agent.js";
+import { expectedExportHeight, figureCanvas } from "./canvas.js";
 import type { PhaseResult, RunContext } from "./context.js";
 import { PhaseError } from "./errors.js";
 import { TeeLog, runCommand } from "./exec.js";
 import { exportDrawioPngRobust } from "./export-png.js";
 import { timerStart, elapsed } from "./log.js";
 import { buildPhase4Prompt } from "./prompts.js";
-import { fileNonEmpty } from "./reports.js";
+import { fileNonEmpty, readJson } from "./reports.js";
 
 export const TARGET_WIDTH = 2560;
-const TARGET_HEIGHTS: Record<string, number> = { "half-width": 1440, "full-width": 1100 };
 
 // drawio-desktop's headless export races MathJax typesetting: math-heavy
 // composites intermittently die on an unhandled UnknownVizError rejection
@@ -116,8 +116,12 @@ async function runDeterministicCompose(ctx: RunContext, tee: TeeLog, start: numb
   });
 
   tee.info("phase4", `verifying export dimensions against placement=${ctx.placement}`);
-  const targetHeight = TARGET_HEIGHTS[ctx.placement];
-  if (!targetHeight) {
+  // The target follows figure.json's canvas: the placement's fixed 21:9 /
+  // 16:9, or a taller canvas that schema.py derived from binding layouts.
+  const figure = readJson(path.join(ctx.workdir, "figure.json"));
+  const targetHeight = expectedExportHeight(figure, ctx.placement, TARGET_WIDTH);
+  const canvas = figureCanvas(figure, ctx.placement);
+  if (!targetHeight || !canvas) {
     tee.err("phase4", `unknown placement ${ctx.placement}`);
     throw new PhaseError(`unknown placement ${ctx.placement}`, 1, tee.logPath);
   }
@@ -133,13 +137,13 @@ async function runDeterministicCompose(ctx: RunContext, tee: TeeLog, start: numb
 
   const low = Math.floor((targetHeight * 90) / 100);
   const high = Math.floor((targetHeight * 110) / 100);
-  tee.info("phase4", `exported ${gotW}x${gotH}px (target ${targetHeight}±10% [${low}..${high}])`);
+  tee.info("phase4", `exported ${gotW}x${gotH}px (target ${targetHeight}±10% [${low}..${high}]; canvas ${canvas[0]}x${canvas[1]})`);
   if (gotW !== TARGET_WIDTH) {
     tee.warn("phase4", `expected width ${TARGET_WIDTH}, got ${gotW} — continuing (Phase 5 re-snaps, Phase 6 audits)`);
   }
   if (gotH < low || gotH > high) {
-    tee.warn("phase4", `height ${gotH} outside placement target ${targetHeight}±10% [${low}..${high}]`);
-    tee.warn("phase4", "composite may be too tall/short — tighten per-panel PAGE_H in the panel generators so the composite matches the placement target; continuing anyway");
+    tee.warn("phase4", `height ${gotH} outside target ${targetHeight}±10% [${low}..${high}]`);
+    tee.warn("phase4", "composite may be too tall/short — tighten per-panel PAGE_H in the panel generators so the composite matches the figure.json canvas; continuing anyway");
   }
 
   tee.done("phase4", `OK (${gotW}x${gotH}, placement=${ctx.placement}) ${elapsed(start)}`);

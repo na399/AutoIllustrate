@@ -37,7 +37,10 @@ literal string `infer`, decide between `half-width` (target 16:9) or
 Do not ask the user. This decision drives the figure's layout
 choice, panel count, and Phase 5's enhancer `--size`. The chosen
 value (`half-width` or `full-width`) becomes the top-level
-`placement` field in `figure.json`.
+`placement` field in `figure.json`. The 16:9 / 21:9 aspect is the
+default canvas; when a panel carries a binding `layout_spec` (Step 5),
+the canvas height follows the layouts instead and the figure may come
+out portrait.
 
 ## Step 2 — Read the source
 
@@ -132,10 +135,10 @@ exception is color the source caption assigns as *meaning* — a
 color-coded section ("the green section"), a path "highlighted in red",
 a legend keyed to hues. That is content/scope, not palette choice: do
 NOT invent it away here — preserve it (see the caption rules below) so
-the Style phase can honour it. Likewise, when two edges form a
-crossing pair, do not ask for "a secondary color" for the pair: say
-the two crossing edges take distinct colors, and leave the hex to
-`style.md`. Also
+the Style phase can honour it. Never ask for distinct or secondary
+colors to make two edges "allowed" to cross: crossings are rejected
+whatever their colors, so plan an arrangement that routes around them
+(user-imposed colors go to `style_constraints` / `palette`, below). Also
 specify: every edge with `source → target`, style (solid = forward
 data flow, dashed = auxiliary/gradient), and whether it carries a
 label; spatial layout (adjacency, alignment, grouping); the importance
@@ -251,7 +254,71 @@ downstream — by the Phase 2 collision check and the Phase 3
 `inspect_panel.py` rendering and detail passes — not by a count at
 planning time.
 
-## Step 6 — Validate and back-fill proportions
+### Binding layouts and visual direction from INSTRUCTIONS
+
+When `INSTRUCTIONS` give a layout to reproduce — an ASCII diagram, a
+row/column arrangement, "A above B", explicit edge routes or
+attachment sides — record it as that panel's `layout_spec` so Phase 2
+must follow it (the panel's geometry is checked against it; prose in
+`drawio_prompt` alone is routinely ignored):
+
+```json
+"layout_spec": {
+  "rows": 4, "cols": 3, "planar": true,
+  "nodes": [{"id": "training", "row": 1, "col": 0, "label": "Training records<br>and labels"}],
+  "containers": [{"id": "development_data", "title": "Development data",
+                  "members": ["training", "validation"], "optional": false}],
+  "edges": [{"id": "training_generate", "source": "training", "target": "generate",
+             "exit": "right", "entry": "left"},
+            {"id": "tagger_host", "source": "tagger_generate", "target": "host",
+             "entry": "top", "label": "span evidence", "dashed": true,
+             "route": "forks from the Tagger trunk"}]
+}
+```
+
+- Grid: 0-based `row` / `col` (optional `rowspan` / `colspan`). Read
+  rows top-to-bottom and columns left-to-right from the drawing; give two
+  nodes the same row only if they sit side by side, the same column only
+  if they are stacked and overlap horizontally, and a span when a node
+  straddles cells. No two nodes share a cell.
+- `containers`: each titled group and its member nodes (no nesting).
+- `edges`: one entry per drawn arrow, `id` lowercase-snake. Count the
+  arrowheads in the drawing (`▶ ◀ ▲ ▼`, `>`, `v`, …): each ends exactly
+  one edge, so the edge list must have one entry per arrowhead — a
+  missing entry is an arrow the panel will not draw. `source` /
+  `target` is a node, a container (an arrow leaving a group's border), or
+  another edge's id (a fork off a shared trunk / a merge onto one).
+  `exit` / `entry` (`top` / `bottom` / `left` / `right`) is the side the
+  arrow leaves / enters, as drawn; required for node and container ends.
+  Put the drawn label text in `label`, `dashed: true` for dashed arrows,
+  and a short `route` hint for anything non-obvious (margin runs, forks).
+- `planar` stays `true` (zero crossings) unless the user's layout itself
+  draws a crossing.
+- Node `label`s and edge `label`s are the user's exact text, with real
+  line breaks as `<br>`.
+- The spec sets the panel's page shape. Step 6 sizes each layout
+  panel's page to its grid's natural aspect: every row / column as
+  tall / wide as its largest labelled box, with an empty row / column
+  kept as a narrow routing channel. So transcribe the drawing's empty
+  tracks only where an arrow or label runs, and choose the top-level
+  `layout` so the panels fit a page: stack (`column`) grids that are
+  wider than tall, and put a grid that is taller than wide in a `row`
+  (or a `grid` cell with a `rowspan`). The canvas keeps a 2000 width
+  and is capped at aspect 0.7 (canvas_h 2857). If Step 6 reports that
+  cap, the layout panels are squeezed, so reconsider the arrangement.
+
+Keep the `drawio_prompt` consistent with the spec (same ids, labels and
+edges); it still carries the semantic encodings and importance ranking.
+
+When `INSTRUCTIONS` impose a visual direction (palette, "ink + one
+accent", stroke widths, fonts), copy it verbatim into the top-level
+`style_constraints`, and list every color it permits as `#RRGGBB` in the
+top-level `palette` (include the text, outline, edge, fill and accent
+colors; white is always allowed). The Style phase must honour both, and
+Phase 2 rejects off-palette colors. Omit both when the user sets no
+visual direction.
+
+## Step 6 — Validate and back-fill the canvas and proportions
 
 Run from any cwd, using the interpreter given as `PYTHON` in the
 dispatch header:
@@ -262,9 +329,14 @@ dispatch header:
 ```
 
 If the validator exits non-zero, fix the JSON and re-run until it
-passes. `--populate-targets` writes `proportion_w` and
-`proportion_h` (both in (0, 1]) into every panel entry; Phase 2
-needs these values.
+passes. `--populate-targets` writes the top-level `canvas_w` /
+`canvas_h` (the composite's inner size in panel-space units) and
+`proportion_w` / `proportion_h` (both in (0, 1], each panel's share of
+that canvas) into `figure.json`; Phase 2 sizes every panel page from
+them. Without a `layout_spec` the canvas is 2000 x 832 (full-width) or
+2000 x 1104 (half-width). With one, the canvas height follows the
+grids' natural aspects, and the printed `canvas=(…)` and per-panel
+targets show the result.
 
 ## Step 7 — Write `$WORKDIR/phase1_report.json`
 

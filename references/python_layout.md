@@ -24,8 +24,16 @@ import math
 # directly, or imported by compose / check_params_contract).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from panel_geometry import Rect, EdgePath, enforce
+# Binding constraints from figure.json: the panel's layout_spec (None when
+# the arrangement is free) and the figure palette (None when unrestricted).
+from panel_layout import GridFrame, load_layout_spec, load_palette
 
-# ── Page ──
+PANEL_ID = Path(__file__).stem.removeprefix("generate_")  # generate_<panel_id>.py
+LAYOUT = load_layout_spec(PANEL_ID)
+PALETTE = load_palette()
+ALLOWED_CROSSINGS: list[tuple[str, str]] = []  # declare a pair only with a reason
+
+# ── Page ── (proportion_w * canvas_w, proportion_h * canvas_h from figure.json)
 PAGE_W, PAGE_H = 1000, 540
 
 # ── Element sizes ──
@@ -43,7 +51,12 @@ CROSS_LABEL_T = 0.22       # position along diagonal (0=source, 1=target)
 CROSS_LABEL_PERP_OFFSET = 16  # perpendicular push outward from diagonal
 
 def build_elements() -> list[Rect]:
-    # return ALL visible elements including edge labels
+    # return ALL visible elements including edge labels and container titles
+    return [ ... ]
+
+def build_containers() -> list[Rect]:
+    # group / zone boxes that enclose other elements (not in build_elements,
+    # so members do not count as collisions); valid edge endpoints
     return [ ... ]
 
 def build_paths() -> list[EdgePath]:
@@ -72,7 +85,11 @@ def build_params(bypass_warnings: bool = False) -> dict:
     """
     elements = build_elements()
     paths    = build_paths()
-    enforce(elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings)
+    enforce(
+        elements, paths, PAGE_W, PAGE_H, bypass_warnings=bypass_warnings,
+        containers=build_containers(), allowed_crossings=ALLOWED_CROSSINGS,
+        layout=LAYOUT, palette=PALETTE,
+    )
     return dict(...)  # all computed positions as ints, plus every path's points + color
 
 def main():
@@ -118,7 +135,8 @@ Every routed edge in the panel is an `EdgePath(name, color, points)`:
 - `color` is a hex literal (e.g. `"#1f78b4"`) and is the SOLE source of
   truth for that edge's stroke color. The template's edge mxCell must
   carry `strokeColor={<name>_color}` — never a hardcoded hex — so the
-  rendered color matches what `check_path_crossings` saw.
+  rendered color matches what `check_edge_palette` saw. Color never
+  exempts a crossing.
 - Stroke weight is fixed: every edge mxCell carries `strokeWidth=3`
   (3pt arrows stay legible once the figure is scaled into a paper
   column).
@@ -145,11 +163,22 @@ individual checks yourself. For reference, the checks it runs:
 2. **`check_short_segments(paths, MIN_SEGMENT_LEN)`** — flags polyline
    segments shorter than `MIN_SEGMENT_LEN` (degenerate near-zero-length
    bends).
-3. **`check_path_crossings(paths)`** — pairwise segment-intersection
-   over all paths. Skip pairs where `a.color != b.color` (different
-   colors are allowed to cross). Treat shared endpoints (`a.points[0]
-   == b.points[0]`, etc.) as non-crossings so legitimate fan-ins /
-   fan-outs at a node aren't flagged.
+3. **`check_path_crossings(paths, allowed_crossings)`** — pairwise
+   segment-intersection over all paths, whatever their colors: every
+   crossing is an error unless its pair of path names is declared in
+   `ALLOWED_CROSSINGS` (forbidden under a planar binding layout).
+   Shared endpoints (`a.points[0] == b.points[0]`, etc.) and T-junction
+   forks are non-crossings so legitimate fan-ins / fan-outs aren't
+   flagged. Any path with more than 2 crossings (declared or not) is an
+   error.
+   **`check_edges_through_elements(paths, elements)`** — error when a
+   segment enters the interior of any node / label `Rect`.
+   **`check_edge_palette(paths, palette)`** — error when an edge color
+   is outside the figure's `palette` (only when one is declared).
+   **`layout.check(...)`** — when the panel has a binding `layout_spec`
+   (`assets/panel_layout.py`), error unless the geometry keeps its grid
+   order, containers, edge set, sides and labels (see
+   `references/panel_agent.md` → "Binding layouts").
 4. **`check_edge_endpoints_on_elements(paths, elements,
    ENDPOINT_SNAP_TOL)`** — warns (does not error) when an edge endpoint
    does not sit on a connected element's border within
@@ -257,7 +286,27 @@ before treating a warning as authoritative.
 
 ## Estimated label sizes
 
-Since LaTeX rendering sizes are not known at generation time, use
+**Plain-text labels: compute, don't guess.** `panel_text.label_size(value,
+font_size, bold=False, box_width=None)` (staged beside `panel_geometry.py`)
+returns the `(w, h)` box a label needs. It uses Helvetica / Helvetica-Bold
+glyph widths, wraps the way draw.io does inside `box_width` (draw.io wraps
+at the box width minus `spacing`, plus 2 px), uses `fontSize x 1.2` per
+line, and adds 2 px of `spacing` on each side. For example:
+
+```python
+from panel_text import label_size
+_, NODE_H = label_size("Python host:<br>compile, measure,<br>rank, journal", 14, box_width=NODE_W)
+NODE_H = math.ceil(NODE_H)              # 55, not the 46 that overflowed in v3c
+_, TITLE_H = label_size("Optional FlowBuilder-Agentic refinement", 15, bold=True, box_width=240)
+TITLE_H = math.ceil(TITLE_H)            # 40: the title wraps to two lines
+```
+
+`main()` re-checks the filled template with `enforce_text_fit`. It
+raises an error when the glyphs spill outside their box, and a warning
+when they touch a bordered box's edge (see
+`references/panel_agent.md`, check 8).
+
+**LaTeX labels** (MathJax sizes are not known at generation time): use
 conservative estimates for collision detection. Use `fontSize=14` as
 the default — at least 14 keeps labels comfortably readable in the
 rendered figure; smaller sizes are legible on screen but tend to look

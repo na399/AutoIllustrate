@@ -91,8 +91,11 @@ what was checked, the template MUST:
 
 4. **Use a `{placeholder}` for `strokeColor`**, filled from
    `EdgePath.color`. Hardcoded `strokeColor=#…` on an edge is forbidden:
-   the crossing check needs Python to be the sole source of truth for
-   color. `lint_math.py` rejects hardcoded edge stroke colors.
+   Python must be the sole source of truth for color so the palette
+   check sees the drawn color (crossings are checked regardless of
+   color). `lint_math.py` rejects hardcoded edge stroke colors, and —
+   when `figure.json` declares a `palette` — any off-palette hex in a
+   cell style (rule (j)).
 
 5. **Stroke weight.** Every edge uses `strokeWidth=3` — 3pt arrows
    read clearly once the figure is scaled into a paper column; thinner

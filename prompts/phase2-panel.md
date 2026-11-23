@@ -17,7 +17,23 @@ starting point for `generate_{{PANEL_ID}}.py`. The fixed geometry
 checks (collision, waypoint, crossing, page-fill, dead-zone) live in the
 shared `panel_geometry.py`, already staged in `{{WORKDIR}}` — the copied
 generator imports it and calls `enforce(...)`. Do NOT copy, edit, or
-delete `panel_geometry.py`, and do NOT re-implement its checks.
+delete `panel_geometry.py`, `panel_layout.py` or `panel_text.py`, and do
+NOT re-implement their checks. Size every labelled box with
+`panel_text.label_size(...)` so its text fits.
+
+BINDING CONSTRAINTS: if this panel's `figure.json` entry has a
+`layout_spec`, reproduce that layout exactly (same grid rows/columns,
+containers, edges and attachment sides; zero crossings when `planar`) —
+see "Binding layouts" in panel_agent.md; the template's `LAYOUT` /
+`PALETTE` wiring makes `enforce` check it. Crossings fail whatever their
+colors: resolve them by routing, never by recoloring an edge.
+
+ITERATE TO GREEN: geometry and text-fit errors (from `enforce`,
+`enforce_rendered`, `enforce_text_fit` or the self-test below) are your work list, not a verdict. Fix them and
+re-run, repeatedly, until the generator runs clean — one correction pass
+is rarely enough for a dense panel. Report `status: "failed"` only for a
+problem you cannot fix in the panel's files (e.g. a broken toolchain),
+never because the geometry still has errors.
 
 Visual inspection, defect repair, and the arrows-only unit-test
 inspections file are NOT your job — they run in Phase 3 (contract in
@@ -33,7 +49,9 @@ the exact check the orchestrator runs after you exit:
 
 On failure it prints a `CONTRACT:` line saying what to fix (usually:
 `build_params(bypass_warnings: bool = False)` must accept that arg and
-return `page_w`/`page_h`). Fix, re-run step 5, repeat until it exits 0.
+return `page_w`/`page_h`; or `RENDER:` lines when the filled template
+does not draw exactly the validated Rects / EdgePaths). Fix, re-run
+step 5, repeat until it exits 0.
 Do not report `status: "ok"` while this check fails.
 
 EXECUTION CONSTRAINTS (never violate):
